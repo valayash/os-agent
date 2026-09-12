@@ -1,0 +1,20 @@
+# secrets
+.env
+
+# run artifacts — trajectories and results (CLAUDE.md §10)
+runs/
+
+# python
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+
+# langgraph checkpointer
+*.sqlite
+*.sqlite3
+
+# macOS
+.DS_Store
