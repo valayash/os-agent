@@ -255,6 +255,14 @@ os-agent/
 │       ├── server.py           # FastAPI + websocket
 │       └── index.html          # single file, no build step
 │
+├── docs/
+│   ├── inside-os-agent.html    # system design explainer — diagrams, budget, gates
+│   └── README.md               # how to keep its figures honest (teal=measured, amber=guess)
+│
+├── scripts/                    # gate checks + diagnostics; never imported by os_agent/
+│   ├── a0_gate.py
+│   └── a1_gate.py
+│
 ├── tasks/
 │   ├── fixtures/               # seed files copied into the sandbox by setup()
 │   └── human_reference.json    # your own step count + wall-clock per task

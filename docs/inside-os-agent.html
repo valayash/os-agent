@@ -1,0 +1,680 @@
+<title>Inside os-agent</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600;700&family=Source+Serif+4:opsz,wght@8..60,400;8..60,600&display=swap">
+<style>
+  :root {
+    --ground:      #F5F6F8;
+    --surface:     #FFFFFF;
+    --surface-2:   #ECEEF2;
+    --ink:         #14181E;
+    --ink-2:       #3D4650;
+    --muted:       #6B7684;
+    --rule:        #D7DBE2;
+    --rule-strong: #B4BCC7;
+    --mark:        #B5342A;   /* the SoM overlay red — the project's one literal colour */
+    --mark-soft:   #F6E4E2;
+    --measured:    #14675F;   /* things we have actually measured */
+    --measured-soft:#DEEDEB;
+    --estimate:    #8A6212;   /* things we are still guessing */
+    --estimate-soft:#F6EEDC;
+    --shadow:      0 1px 2px rgba(20,24,30,.06), 0 8px 24px rgba(20,24,30,.05);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --ground:      #0E1217;
+      --surface:     #161B22;
+      --surface-2:   #1E242D;
+      --ink:         #E7EBF1;
+      --ink-2:       #BAC3CF;
+      --muted:       #8A94A3;
+      --rule:        #2A323C;
+      --rule-strong: #3C4653;
+      --mark:        #E8695D;
+      --mark-soft:   #35211F;
+      --measured:    #47B3A6;
+      --measured-soft:#122A28;
+      --estimate:    #D9A33C;
+      --estimate-soft:#2C2416;
+      --shadow:      0 1px 2px rgba(0,0,0,.4), 0 8px 24px rgba(0,0,0,.3);
+    }
+  }
+  :root[data-theme="dark"] {
+    --ground:      #0E1217;
+    --surface:     #161B22;
+    --surface-2:   #1E242D;
+    --ink:         #E7EBF1;
+    --ink-2:       #BAC3CF;
+    --muted:       #8A94A3;
+    --rule:        #2A323C;
+    --rule-strong: #3C4653;
+    --mark:        #E8695D;
+    --mark-soft:   #35211F;
+    --measured:    #47B3A6;
+    --measured-soft:#122A28;
+    --estimate:    #D9A33C;
+    --estimate-soft:#2C2416;
+    --shadow:      0 1px 2px rgba(0,0,0,.4), 0 8px 24px rgba(0,0,0,.3);
+  }
+
+  * { box-sizing: border-box; }
+  body {
+    background: var(--ground);
+    color: var(--ink);
+    font-family: "Source Serif 4", Georgia, serif;
+    font-size: 17px;
+    line-height: 1.65;
+    margin: 0;
+    padding: 0 20px 96px;
+  }
+  .wrap { max-width: 1080px; margin: 0 auto; }
+  .col  { max-width: 660px; }
+
+  h1, h2, h3, .ui, th, .eyebrow, figcaption, .tag, .num {
+    font-family: "IBM Plex Sans", system-ui, -apple-system, sans-serif;
+  }
+  code, .mono, pre { font-family: "IBM Plex Mono", ui-monospace, Menlo, monospace; }
+
+  header { padding: 72px 0 40px; border-bottom: 1px solid var(--rule); margin-bottom: 8px; }
+  .eyebrow {
+    font-size: 11px; font-weight: 600; letter-spacing: .14em; text-transform: uppercase;
+    color: var(--mark); margin: 0 0 14px;
+  }
+  h1 {
+    font-size: clamp(38px, 6vw, 58px); font-weight: 700; letter-spacing: -.028em;
+    line-height: 1.02; margin: 0 0 20px; text-wrap: balance;
+  }
+  .lede { font-size: 21px; line-height: 1.5; color: var(--ink-2); margin: 0; max-width: 620px; }
+
+  .status { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 30px; }
+  .tag {
+    font-size: 12px; font-weight: 500; padding: 5px 11px; border-radius: 3px;
+    border: 1px solid var(--rule-strong); color: var(--ink-2); background: var(--surface);
+  }
+  .tag.done { border-color: var(--measured); color: var(--measured); background: var(--measured-soft); }
+  .tag.now  { border-color: var(--mark); color: var(--mark); background: var(--mark-soft); }
+
+  section { padding: 54px 0 10px; border-top: 1px solid var(--rule); margin-top: 46px; }
+  section:first-of-type { border-top: none; margin-top: 0; }
+  h2 {
+    font-size: 13px; font-weight: 600; letter-spacing: .13em; text-transform: uppercase;
+    color: var(--muted); margin: 0 0 10px;
+  }
+  h2 + .headline {
+    font-family: "IBM Plex Sans", sans-serif; font-size: 30px; font-weight: 600;
+    letter-spacing: -.02em; line-height: 1.18; margin: 0 0 22px; text-wrap: balance;
+  }
+  h3 {
+    font-size: 15px; font-weight: 600; letter-spacing: -.005em;
+    margin: 34px 0 8px; color: var(--ink);
+  }
+  p { margin: 0 0 18px; }
+  strong { font-weight: 600; }
+  em { font-style: italic; }
+  a { color: var(--mark); text-decoration-thickness: 1px; text-underline-offset: 2px; }
+  a:focus-visible, [tabindex]:focus-visible { outline: 2px solid var(--mark); outline-offset: 3px; }
+
+  code {
+    font-size: .88em; background: var(--surface-2); padding: 1px 5px;
+    border-radius: 3px; color: var(--ink);
+  }
+
+  figure { margin: 34px 0 30px; }
+  .fig-wide { max-width: 100%; overflow-x: auto; }
+  svg.diagram {
+    display: block; width: 100%; max-width: 900px; height: auto;
+    color: var(--ink-2); background: var(--surface);
+    border: 1px solid var(--rule); border-radius: 4px; padding: 14px 10px;
+  }
+  figcaption {
+    font-size: 13px; line-height: 1.5; color: var(--muted);
+    margin-top: 12px; max-width: 640px;
+  }
+  figcaption b { color: var(--ink-2); font-weight: 600; }
+
+  table { border-collapse: collapse; width: 100%; margin: 6px 0 22px; font-size: 14.5px; }
+  th, td {
+    text-align: left; padding: 9px 14px 9px 0; border-bottom: 1px solid var(--rule);
+    vertical-align: top;
+  }
+  th {
+    font-size: 11px; font-weight: 600; letter-spacing: .09em; text-transform: uppercase;
+    color: var(--muted); border-bottom-color: var(--rule-strong);
+  }
+  td.n { font-family: "IBM Plex Mono", monospace; font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .m  { color: var(--measured); font-weight: 600; }
+  .g  { color: var(--estimate); font-weight: 600; }
+
+  ul { margin: 0 0 18px; padding-left: 20px; }
+  li { margin-bottom: 7px; }
+
+  .callout {
+    border-left: 3px solid var(--mark); background: var(--surface);
+    padding: 16px 20px; margin: 26px 0; border-radius: 0 4px 4px 0;
+    box-shadow: var(--shadow);
+  }
+  .callout p:last-child { margin-bottom: 0; }
+  .callout .ui {
+    font-size: 11px; font-weight: 600; letter-spacing: .12em; text-transform: uppercase;
+    color: var(--mark); display: block; margin-bottom: 7px;
+  }
+
+  .gates { display: grid; gap: 1px; background: var(--rule); border: 1px solid var(--rule);
+           border-radius: 4px; overflow: hidden; margin: 10px 0 24px; }
+  .gate { background: var(--surface); padding: 13px 16px; display: grid;
+          grid-template-columns: 46px 1fr auto; gap: 14px; align-items: baseline; }
+  .gate .num { font-family: "IBM Plex Mono", monospace; font-size: 13px; font-weight: 600; color: var(--muted); }
+  .gate .what { font-family: "IBM Plex Sans", sans-serif; font-size: 14.5px; }
+  .gate .what small { display: block; color: var(--muted); font-size: 12.5px; margin-top: 2px; }
+  .gate .st { font-family: "IBM Plex Sans", sans-serif; font-size: 11px; font-weight: 600;
+              letter-spacing: .08em; text-transform: uppercase; white-space: nowrap; }
+  .gate.done { background: var(--measured-soft); }
+  .gate.done .num, .gate.done .st { color: var(--measured); }
+  .gate.now { background: var(--mark-soft); }
+  .gate.now .num, .gate.now .st { color: var(--mark); }
+  .gate.todo .st { color: var(--muted); }
+
+  .budget { margin: 18px 0 8px; }
+  .bar { display: flex; height: 38px; border-radius: 3px; overflow: hidden;
+         border: 1px solid var(--rule-strong); }
+  .bar div { display: flex; align-items: center; justify-content: center;
+             font-family: "IBM Plex Sans", sans-serif; font-size: 11px; font-weight: 600;
+             color: var(--surface); }
+  .key { display: flex; flex-wrap: wrap; gap: 16px; margin-top: 12px; font-size: 12.5px;
+         font-family: "IBM Plex Sans", sans-serif; color: var(--muted); }
+  .key span { display: inline-flex; align-items: center; gap: 7px; }
+  .sw { width: 11px; height: 11px; border-radius: 2px; display: inline-block; }
+
+  footer { margin-top: 64px; padding-top: 26px; border-top: 1px solid var(--rule);
+           font-family: "IBM Plex Sans", sans-serif; font-size: 13px; color: var(--muted); }
+
+  @media (prefers-reduced-motion: reduce) { * { animation: none !important; transition: none !important; } }
+</style>
+
+<div class="wrap">
+
+<header>
+  <p class="eyebrow">Computer-use agent &middot; system design</p>
+  <h1>Inside os-agent</h1>
+  <p class="lede">
+    An agent that drives a real macOS desktop by looking at screenshots. It is not trying to
+    be the most accurate one. It is trying to be the same accuracy, five to ten times faster —
+    and to prove it with numbers that someone else could reproduce.
+  </p>
+  <div class="status">
+    <span class="tag done">A0 permissions &middot; passed</span>
+    <span class="tag done">A1 seams &amp; guardrails &middot; passed</span>
+    <span class="tag now">A2 perception &middot; in progress</span>
+    <span class="tag">A3–A8 &middot; ahead</span>
+  </div>
+</header>
+
+<section>
+  <div class="col">
+    <h2>The premise</h2>
+    <p class="headline">One number decides whether this project works</p>
+    <p>
+      Published computer-use agents are accurate and unusably slow — tens of minutes for tasks a
+      person does in two. The causes are structural rather than about model quality: several
+      model calls per step, and a context that grows until late steps cost three times what
+      early ones did.
+    </p>
+    <p>
+      So the target is not “be smart.” It is <strong>LLM calls per step = 1.0</strong>.
+      A step costing one 2.5&nbsp;s vision call makes a 15-step task about 40&nbsp;s of model time.
+      The same step costing four calls — plan, ground, verify, reflect — makes it 160&nbsp;s
+      before context growth multiplies it. Every architectural decision below is downstream
+      of holding that ratio at one.
+    </p>
+  </div>
+
+  <figure class="fig-wide">
+    <svg class="diagram" viewBox="0 0 880 392" role="img" aria-label="The agent loop: observe, plan, execute, verify, with verify routing back to observe on success, to end on done, and to reflect after two failures. Only the plan node makes an LLM call.">
+      <defs>
+        <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <polygon points="0,1 10,5 0,9" fill="currentColor"></polygon>
+        </marker>
+        <marker id="ahm" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <polygon points="0,1 10,5 0,9" fill="#B5342A"></polygon>
+        </marker>
+      </defs>
+
+      <!-- success return arc -->
+      <path d="M 700 148 L 700 66 L 105 66 L 105 140" fill="none" stroke="currentColor" stroke-width="1.5" marker-end="url(#ah)"></path>
+      <text x="402" y="58" text-anchor="middle" font-size="12" fill="currentColor">success — next step</text>
+
+      <!-- main row -->
+      <rect x="40" y="148" width="130" height="58" rx="3" fill="none" stroke="currentColor" stroke-width="1.5"></rect>
+      <text x="105" y="173" text-anchor="middle" font-size="14" font-weight="600" fill="currentColor">observe</text>
+      <text x="105" y="191" text-anchor="middle" font-size="11" fill="currentColor" opacity=".72">capture + elements</text>
+
+      <rect x="220" y="148" width="130" height="58" rx="3" fill="none" stroke="#B5342A" stroke-width="2"></rect>
+      <text x="285" y="173" text-anchor="middle" font-size="14" font-weight="600" fill="#B5342A">plan</text>
+      <text x="285" y="191" text-anchor="middle" font-size="11" fill="#B5342A">1 LLM call</text>
+
+      <rect x="400" y="148" width="130" height="58" rx="3" fill="none" stroke="currentColor" stroke-width="1.5"></rect>
+      <text x="465" y="173" text-anchor="middle" font-size="14" font-weight="600" fill="currentColor">execute</text>
+      <text x="465" y="191" text-anchor="middle" font-size="11" fill="currentColor" opacity=".72">policy → adapter</text>
+
+      <rect x="580" y="148" width="130" height="58" rx="3" fill="none" stroke="currentColor" stroke-width="1.5"></rect>
+      <text x="645" y="173" text-anchor="middle" font-size="14" font-weight="600" fill="currentColor">verify</text>
+      <text x="645" y="191" text-anchor="middle" font-size="11" fill="currentColor" opacity=".72">0 LLM calls</text>
+
+      <line x1="170" y1="177" x2="212" y2="177" stroke="currentColor" stroke-width="1.5" marker-end="url(#ah)"></line>
+      <line x1="350" y1="177" x2="392" y2="177" stroke="currentColor" stroke-width="1.5" marker-end="url(#ah)"></line>
+      <line x1="530" y1="177" x2="572" y2="177" stroke="currentColor" stroke-width="1.5" marker-end="url(#ah)"></line>
+      <text x="191" y="167" text-anchor="middle" font-size="10.5" fill="currentColor" opacity=".7">state</text>
+      <text x="371" y="167" text-anchor="middle" font-size="10.5" fill="currentColor" opacity=".7">Action[]</text>
+      <text x="551" y="167" text-anchor="middle" font-size="10.5" fill="currentColor" opacity=".7">expect</text>
+
+      <!-- done -->
+      <line x1="710" y1="177" x2="780" y2="177" stroke="currentColor" stroke-width="1.5" marker-end="url(#ah)"></line>
+      <text x="745" y="167" text-anchor="middle" font-size="11" fill="currentColor">done</text>
+      <circle cx="810" cy="177" r="16" fill="none" stroke="currentColor" stroke-width="1.5"></circle>
+      <circle cx="810" cy="177" r="10" fill="currentColor"></circle>
+
+      <!-- reflect -->
+      <path d="M 645 214 L 645 286 L 350 286" fill="none" stroke="currentColor" stroke-width="1.5" marker-end="url(#ah)"></path>
+      <text x="520" y="278" text-anchor="middle" font-size="11.5" fill="currentColor">2 consecutive failures, or a repeat loop</text>
+      <rect x="220" y="258" width="130" height="56" rx="3" fill="none" stroke="currentColor" stroke-width="1.5" stroke-dasharray="4 3"></rect>
+      <text x="285" y="282" text-anchor="middle" font-size="14" font-weight="600" fill="currentColor">reflect</text>
+      <text x="285" y="299" text-anchor="middle" font-size="11" fill="currentColor" opacity=".72">rare — extra call</text>
+      <path d="M 285 258 L 285 214" fill="none" stroke="currentColor" stroke-width="1.5" marker-end="url(#ah)"></path>
+      <text x="296" y="238" font-size="11" fill="currentColor">retry</text>
+
+      <!-- caps -->
+      <path d="M 645 214 L 645 348 L 794 348 L 794 200" fill="none" stroke="currentColor" stroke-width="1.2" stroke-dasharray="3 3" marker-end="url(#ah)"></path>
+      <text x="700" y="364" font-size="11" fill="currentColor" opacity=".8">step ≥ 50 · budget exceeded · stuck</text>
+    </svg>
+    <figcaption>
+      <b>The loop, and where the money goes.</b> Only <code>plan</code> calls a model. <code>verify</code>
+      is deliberately on the other side of that line — it checks a postcondition the planner already
+      emitted, using a pixel diff and the accessibility tree, at zero model cost. <code>reflect</code>
+      is an escape hatch, not a step: every time it fires, calls-per-step rises above 1.0.
+    </figcaption>
+  </figure>
+</section>
+
+<section>
+  <div class="col">
+    <h2>The trick</h2>
+    <p class="headline">Verification without a second model call</p>
+    <p>
+      Most agents ask a model “did that work?” That is the second call, and it is the one that
+      quietly doubles the bill. The alternative costs nothing: the planner already knows what it
+      expects to happen, so it says so <em>in the same response</em>.
+    </p>
+  </div>
+
+  <div class="col">
+    <table>
+      <tr><th style="width:36%">Field</th><th>What it buys</th></tr>
+      <tr><td class="n">action</td><td>the thing to do</td></tr>
+      <tr><td class="n">expect</td><td><strong>a machine-checkable postcondition</strong> — “an element named ‘Save’ disappears”</td></tr>
+      <tr><td class="n">confidence</td><td>unused now; drives model cascading later</td></tr>
+      <tr><td class="n">new_fact</td><td>at most one durable discovery, to keep memory bounded</td></tr>
+    </table>
+    <p>
+      Verification becomes a string comparison. The outcome is deliberately not a boolean — it is
+      <code>success</code>, <code>no_change</code>, <code>error</code>, or <code>ambiguous</code>.
+      Only <code>ambiguous</code> escalates to a model, so <strong>ambiguous rate</strong> is tracked
+      as a headline metric: it is literally the count of calls we failed to avoid.
+    </p>
+  </div>
+</section>
+
+<section>
+  <div class="col">
+    <h2>Grounding</h2>
+    <p class="headline">The model sees a picture. How does it say where to click?</p>
+    <p>
+      There are only three answers, and the choice sets the architecture. This is the single most
+      consequential design decision in the system.
+    </p>
+  </div>
+
+  <figure class="fig-wide">
+    <svg class="diagram" viewBox="0 0 880 330" role="img" aria-label="Three grounding strategies compared. Raw coordinates: one call but inaccurate. Describe plus a separate grounding model: accurate but two calls per step. Set-of-Marks: accurate and one call, and is the chosen approach.">
+      <defs>
+        <marker id="ah2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <polygon points="0,1 10,5 0,9" fill="currentColor"></polygon>
+        </marker>
+        <marker id="ah2m" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <polygon points="0,1 10,5 0,9" fill="#B5342A"></polygon>
+        </marker>
+      </defs>
+
+      <text x="14" y="26" font-size="11" font-weight="600" fill="currentColor" opacity=".65" letter-spacing="1.2">STRATEGY</text>
+      <text x="700" y="26" font-size="11" font-weight="600" fill="currentColor" opacity=".65" letter-spacing="1.2">CALLS / STEP</text>
+      <line x1="14" y1="36" x2="866" y2="36" stroke="currentColor" stroke-width="1" opacity=".3"></line>
+
+      <!-- row 1 -->
+      <text x="14" y="76" font-size="13" font-weight="600" fill="currentColor">Raw coordinates</text>
+      <rect x="196" y="56" width="104" height="40" rx="3" fill="none" stroke="currentColor" stroke-width="1.3"></rect>
+      <text x="248" y="81" text-anchor="middle" font-size="11.5" fill="currentColor">screenshot</text>
+      <line x1="300" y1="76" x2="356" y2="76" stroke="currentColor" stroke-width="1.3" marker-end="url(#ah2)"></line>
+      <rect x="360" y="56" width="104" height="40" rx="3" fill="none" stroke="currentColor" stroke-width="1.3"></rect>
+      <text x="412" y="81" text-anchor="middle" font-size="11.5" fill="currentColor">planner</text>
+      <line x1="464" y1="76" x2="520" y2="76" stroke="currentColor" stroke-width="1.3" marker-end="url(#ah2)"></line>
+      <text x="530" y="73" font-size="11.5" fill="currentColor" font-family="IBM Plex Mono, monospace">click(412, 208)</text>
+      <text x="530" y="90" font-size="11" fill="#B5342A">misses by 20–30 px — regression over a continuous plane</text>
+      <text x="748" y="82" font-size="15" font-weight="700" fill="currentColor" font-family="IBM Plex Mono, monospace">1</text>
+      <line x1="14" y1="112" x2="866" y2="112" stroke="currentColor" stroke-width="1" opacity=".18"></line>
+
+      <!-- row 2 -->
+      <text x="14" y="152" font-size="13" font-weight="600" fill="currentColor">Describe, then ground</text>
+      <rect x="196" y="132" width="104" height="40" rx="3" fill="none" stroke="currentColor" stroke-width="1.3"></rect>
+      <text x="248" y="157" text-anchor="middle" font-size="11.5" fill="currentColor">screenshot</text>
+      <line x1="300" y1="152" x2="356" y2="152" stroke="currentColor" stroke-width="1.3" marker-end="url(#ah2)"></line>
+      <rect x="360" y="132" width="104" height="40" rx="3" fill="none" stroke="currentColor" stroke-width="1.3"></rect>
+      <text x="412" y="157" text-anchor="middle" font-size="11.5" fill="currentColor">planner</text>
+      <line x1="464" y1="152" x2="520" y2="152" stroke="#B5342A" stroke-width="1.6" marker-end="url(#ah2m)"></line>
+      <text x="492" y="145" text-anchor="middle" font-size="10" fill="#B5342A">“the Save button”</text>
+      <rect x="524" y="132" width="122" height="40" rx="3" fill="none" stroke="#B5342A" stroke-width="2"></rect>
+      <text x="585" y="151" text-anchor="middle" font-size="11.5" font-weight="600" fill="#B5342A">grounding model</text>
+      <text x="585" y="165" text-anchor="middle" font-size="10" fill="#B5342A">the extra hop</text>
+      <text x="654" y="157" font-size="11.5" fill="currentColor">→ coords</text>
+      <text x="744" y="158" font-size="15" font-weight="700" fill="#B5342A" font-family="IBM Plex Mono, monospace">2</text>
+      <line x1="14" y1="188" x2="866" y2="188" stroke="currentColor" stroke-width="1" opacity=".18"></line>
+
+      <!-- row 3 -->
+      <text x="14" y="232" font-size="13" font-weight="600" fill="currentColor">Set-of-Marks</text>
+      <text x="14" y="248" font-size="11" fill="currentColor" opacity=".7">chosen</text>
+      <rect x="196" y="208" width="104" height="40" rx="3" fill="none" stroke="currentColor" stroke-width="1.3"></rect>
+      <text x="248" y="226" text-anchor="middle" font-size="11.5" fill="currentColor">screenshot</text>
+      <text x="248" y="240" text-anchor="middle" font-size="10" fill="#B5342A">+ numbered boxes</text>
+      <rect x="206" y="213" width="15" height="12" rx="1.5" fill="none" stroke="#B5342A" stroke-width="1.4"></rect>
+      <rect x="206" y="213" width="8" height="7" fill="#B5342A"></rect>
+      <line x1="300" y1="228" x2="356" y2="228" stroke="currentColor" stroke-width="1.3" marker-end="url(#ah2)"></line>
+      <rect x="360" y="208" width="104" height="40" rx="3" fill="none" stroke="currentColor" stroke-width="1.3"></rect>
+      <text x="412" y="233" text-anchor="middle" font-size="11.5" fill="currentColor">planner</text>
+      <line x1="464" y1="228" x2="520" y2="228" stroke="currentColor" stroke-width="1.3" marker-end="url(#ah2)"></line>
+      <text x="530" y="225" font-size="11.5" fill="currentColor" font-family="IBM Plex Mono, monospace">click element 14</text>
+      <text x="530" y="242" font-size="11" fill="#14675F">pick one of N — classification, not regression</text>
+      <text x="748" y="234" font-size="15" font-weight="700" fill="currentColor" font-family="IBM Plex Mono, monospace">1</text>
+      <line x1="14" y1="264" x2="866" y2="264" stroke="currentColor" stroke-width="1" opacity=".3"></line>
+
+      <text x="14" y="294" font-size="12.5" fill="currentColor" opacity=".85">Set-of-Marks is the only option that is both accurate and one call. That is the whole reason it is here.</text>
+      <text x="14" y="314" font-size="11.5" fill="currentColor" opacity=".6">The numbered boxes come from the operating system's accessibility tree — assistive technology, repurposed as the agent's eyes.</text>
+    </svg>
+    <figcaption>
+      <b>Why the boxes exist.</b> Numbering candidate elements turns “predict x,y on a continuous
+      plane” into “pick one of forty” — and models are far better at the second. The alternative that
+      is equally accurate costs a second model call per step, which is the one thing this project
+      cannot spend.
+    </figcaption>
+  </figure>
+</section>
+
+<section>
+  <div class="col">
+    <h2>Perception</h2>
+    <p class="headline">Filtering is the decision, not the tree walk</p>
+    <p>
+      The accessibility tree is the desktop's equivalent of a DOM: every control's role, name and
+      geometry, published by the OS so screen readers can work. Reading it is mechanical. Deciding
+      <em>which</em> nodes deserve a number is the part that determines whether the agent functions,
+      and it is squeezed from both sides.
+    </p>
+  </div>
+
+  <figure class="fig-wide">
+    <svg class="diagram" viewBox="0 0 880 250" role="img" aria-label="Perception pipeline: the accessibility walk produces twelve raw nodes from TextEdit, filtering removes containers, unnamed decoration, tiny and duplicate boxes, leaving six elements which are numbered in banded reading order and drawn as numbered boxes.">
+      <defs>
+        <marker id="ah3" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <polygon points="0,1 10,5 0,9" fill="currentColor"></polygon>
+        </marker>
+      </defs>
+
+      <rect x="18" y="66" width="150" height="66" rx="3" fill="none" stroke="currentColor" stroke-width="1.5"></rect>
+      <text x="93" y="92" text-anchor="middle" font-size="13" font-weight="600" fill="currentColor">AX walk</text>
+      <text x="93" y="110" text-anchor="middle" font-size="11" fill="currentColor" opacity=".72">focused window only</text>
+      <text x="93" y="124" text-anchor="middle" font-size="11" fill="#14675F" font-weight="600">77 ms measured</text>
+      <text x="93" y="52" text-anchor="middle" font-size="12" fill="currentColor" font-family="IBM Plex Mono, monospace">12 raw nodes</text>
+
+      <line x1="168" y1="99" x2="222" y2="99" stroke="currentColor" stroke-width="1.5" marker-end="url(#ah3)"></line>
+
+      <rect x="226" y="52" width="230" height="94" rx="3" fill="none" stroke="#B5342A" stroke-width="2"></rect>
+      <text x="341" y="74" text-anchor="middle" font-size="13" font-weight="600" fill="#B5342A">filter</text>
+      <text x="238" y="94" font-size="11" fill="currentColor">− containers and groups</text>
+      <text x="238" y="110" font-size="11" fill="currentColor">− unnamed decoration</text>
+      <text x="238" y="126" font-size="11" fill="currentColor">− area &lt; 20 pt², offscreen, disabled</text>
+      <text x="238" y="141" font-size="11" fill="currentColor">− duplicate bounding boxes</text>
+
+      <line x1="456" y1="99" x2="510" y2="99" stroke="currentColor" stroke-width="1.5" marker-end="url(#ah3)"></line>
+
+      <rect x="514" y="66" width="150" height="66" rx="3" fill="none" stroke="currentColor" stroke-width="1.5"></rect>
+      <text x="589" y="92" text-anchor="middle" font-size="13" font-weight="600" fill="currentColor">number</text>
+      <text x="589" y="110" text-anchor="middle" font-size="11" fill="currentColor" opacity=".72">banded reading order</text>
+      <text x="589" y="124" text-anchor="middle" font-size="11" fill="currentColor" opacity=".72">top→bottom, left→right</text>
+      <text x="589" y="52" text-anchor="middle" font-size="12" fill="currentColor" font-family="IBM Plex Mono, monospace">6 elements · ~90 tokens</text>
+
+      <line x1="664" y1="99" x2="718" y2="99" stroke="currentColor" stroke-width="1.5" marker-end="url(#ah3)"></line>
+
+      <rect x="722" y="60" width="130" height="78" rx="3" fill="none" stroke="currentColor" stroke-width="1.5"></rect>
+      <rect x="736" y="74" width="46" height="20" rx="1.5" fill="none" stroke="#B5342A" stroke-width="1.5"></rect>
+      <rect x="736" y="74" width="13" height="10" fill="#B5342A"></rect>
+      <rect x="792" y="74" width="46" height="20" rx="1.5" fill="none" stroke="#B5342A" stroke-width="1.5"></rect>
+      <rect x="792" y="74" width="13" height="10" fill="#B5342A"></rect>
+      <rect x="736" y="104" width="102" height="22" rx="1.5" fill="none" stroke="#B5342A" stroke-width="1.5"></rect>
+      <rect x="736" y="104" width="13" height="10" fill="#B5342A"></rect>
+      <text x="787" y="52" text-anchor="middle" font-size="12" fill="currentColor">overlay</text>
+
+      <line x1="18" y1="178" x2="862" y2="178" stroke="currentColor" stroke-width="1" opacity=".25"></line>
+      <text x="18" y="202" font-size="12" font-weight="600" fill="currentColor">Too many elements</text>
+      <text x="18" y="219" font-size="11.5" fill="currentColor" opacity=".8">unreadable overlay, and ~15 prompt tokens each — 300 elements is 4,500 tokens of noise</text>
+      <text x="18" y="236" font-size="11.5" fill="#B5342A">a latency failure, not only an accuracy one</text>
+      <text x="470" y="202" font-size="12" font-weight="600" fill="currentColor">Too few elements</text>
+      <text x="470" y="219" font-size="11.5" fill="currentColor" opacity=".8">the thing the agent must click has no number, so it cannot be clicked at all</text>
+      <text x="470" y="236" font-size="11.5" fill="#B5342A">a hard failure, silent at the model</text>
+    </svg>
+    <figcaption>
+      <b>Real numbers from TextEdit.</b> Twelve raw nodes become six numbered elements. Note that
+      over-inclusion is a <em>latency</em> failure — each element is prompt tokens on every single
+      step — which is why perception belongs in a project about speed rather than in an appendix.
+      Normalization happens here too (<code>AXButton</code> → <code>button</code>) so the prompt never
+      leaks platform dialect.
+    </figcaption>
+  </figure>
+</section>
+
+<section>
+  <div class="col">
+    <h2>Structure</h2>
+    <p class="headline">Three seams, and nothing else gets an interface</p>
+    <p>
+      Every abstraction exists because <em>we</em> cross that boundary ourselves — swapping a backend
+      to test, swapping a model to compare, replacing the loop entirely in Phase&nbsp;B. Nothing was
+      abstracted for a hypothetical future user.
+    </p>
+  </div>
+
+  <figure class="fig-wide">
+    <svg class="diagram" viewBox="0 0 880 400" role="img" aria-label="Three seams. The agent core sits above three protocols: Environment, LLMClient and DesktopAdapter. Behind Environment sit DesktopEnv and ReplayEnv; behind LLMClient sits LiteLLM with Gemini, Anthropic and Ollama; behind DesktopAdapter sit macOS which is implemented and Windows and Linux which are not.">
+      <defs>
+        <marker id="ah4" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <polygon points="0,1 10,5 0,9" fill="currentColor"></polygon>
+        </marker>
+      </defs>
+
+      <rect x="40" y="24" width="800" height="54" rx="3" fill="none" stroke="currentColor" stroke-width="1.8"></rect>
+      <text x="440" y="47" text-anchor="middle" font-size="14" font-weight="600" fill="currentColor">agent/ — the loop (LangGraph)</text>
+      <text x="440" y="65" text-anchor="middle" font-size="11" fill="currentColor" opacity=".7">the only place that imports langgraph — it is a subject of the experiment, not a foundation</text>
+
+      <line x1="180" y1="78" x2="180" y2="108" stroke="currentColor" stroke-width="1.5" marker-end="url(#ah4)"></line>
+      <line x1="440" y1="78" x2="440" y2="108" stroke="currentColor" stroke-width="1.5" marker-end="url(#ah4)"></line>
+      <line x1="700" y1="78" x2="700" y2="108" stroke="currentColor" stroke-width="1.5" marker-end="url(#ah4)"></line>
+
+      <!-- seam bars -->
+      <rect x="40" y="112" width="280" height="46" rx="3" fill="#B5342A" fill-opacity=".09" stroke="#B5342A" stroke-width="2"></rect>
+      <text x="180" y="132" text-anchor="middle" font-size="13" font-weight="600" fill="#B5342A">Environment</text>
+      <text x="180" y="149" text-anchor="middle" font-size="10.5" fill="#B5342A">reset · observe · act · evaluate</text>
+
+      <rect x="332" y="112" width="216" height="46" rx="3" fill="#B5342A" fill-opacity=".09" stroke="#B5342A" stroke-width="2"></rect>
+      <text x="440" y="132" text-anchor="middle" font-size="13" font-weight="600" fill="#B5342A">LLMClient</text>
+      <text x="440" y="149" text-anchor="middle" font-size="10.5" fill="#B5342A">plan(system, text, image, schema)</text>
+
+      <rect x="560" y="112" width="280" height="46" rx="3" fill="#B5342A" fill-opacity=".09" stroke="#B5342A" stroke-width="2"></rect>
+      <text x="700" y="132" text-anchor="middle" font-size="13" font-weight="600" fill="#B5342A">DesktopAdapter</text>
+      <text x="700" y="149" text-anchor="middle" font-size="10.5" fill="#B5342A">capture · raw_tree · click · type</text>
+
+      <line x1="180" y1="158" x2="180" y2="188" stroke="currentColor" stroke-width="1.5" marker-end="url(#ah4)"></line>
+      <line x1="440" y1="158" x2="440" y2="188" stroke="currentColor" stroke-width="1.5" marker-end="url(#ah4)"></line>
+      <line x1="700" y1="158" x2="700" y2="188" stroke="currentColor" stroke-width="1.5" marker-end="url(#ah4)"></line>
+
+      <!-- implementations -->
+      <rect x="40" y="192" width="132" height="42" rx="3" fill="none" stroke="#14675F" stroke-width="1.6"></rect>
+      <text x="106" y="212" text-anchor="middle" font-size="12" font-weight="600" fill="#14675F">DesktopEnv</text>
+      <text x="106" y="227" text-anchor="middle" font-size="10" fill="#14675F">the real machine</text>
+      <rect x="188" y="192" width="132" height="42" rx="3" fill="none" stroke="currentColor" stroke-width="1.4" stroke-dasharray="4 3"></rect>
+      <text x="254" y="212" text-anchor="middle" font-size="12" font-weight="600" fill="currentColor">ReplayEnv</text>
+      <text x="254" y="227" text-anchor="middle" font-size="10" fill="currentColor" opacity=".7">graph tests, A3</text>
+
+      <rect x="332" y="192" width="216" height="42" rx="3" fill="none" stroke="currentColor" stroke-width="1.4" stroke-dasharray="4 3"></rect>
+      <text x="440" y="212" text-anchor="middle" font-size="12" font-weight="600" fill="currentColor">LiteLLM</text>
+      <text x="440" y="227" text-anchor="middle" font-size="10" fill="currentColor" opacity=".7">Gemini · Anthropic · Ollama — one env var, A4</text>
+
+      <rect x="560" y="192" width="88" height="42" rx="3" fill="none" stroke="#14675F" stroke-width="1.6"></rect>
+      <text x="604" y="212" text-anchor="middle" font-size="12" font-weight="600" fill="#14675F">macOS</text>
+      <text x="604" y="227" text-anchor="middle" font-size="10" fill="#14675F">implemented</text>
+      <rect x="656" y="192" width="88" height="42" rx="3" fill="none" stroke="currentColor" stroke-width="1.2" stroke-dasharray="3 3" opacity=".55"></rect>
+      <text x="700" y="212" text-anchor="middle" font-size="12" fill="currentColor" opacity=".6">Windows</text>
+      <text x="700" y="227" text-anchor="middle" font-size="10" fill="currentColor" opacity=".6">raises</text>
+      <rect x="752" y="192" width="88" height="42" rx="3" fill="none" stroke="currentColor" stroke-width="1.2" stroke-dasharray="3 3" opacity=".55"></rect>
+      <text x="796" y="212" text-anchor="middle" font-size="12" fill="currentColor" opacity=".6">Linux</text>
+      <text x="796" y="227" text-anchor="middle" font-size="10" fill="currentColor" opacity=".6">raises</text>
+
+      <line x1="40" y1="264" x2="840" y2="264" stroke="currentColor" stroke-width="1" opacity=".25"></line>
+
+      <text x="40" y="290" font-size="12" font-weight="600" fill="currentColor">Why each one is real, not decoration</text>
+      <text x="40" y="312" font-size="11.5" fill="currentColor" opacity=".85">Environment — Phase B replaces the entire loop; graph tests must run with no machine attached.</text>
+      <text x="40" y="332" font-size="11.5" fill="currentColor" opacity=".85">LLMClient — model choice is an ablation row. Provider knobs pass through untouched, because they are what we measure.</text>
+      <text x="40" y="352" font-size="11.5" fill="currentColor" opacity=".85">DesktopAdapter — filtering and numbering live above it, so a new platform writes a tree walk, not a second perception stack.</text>
+      <text x="40" y="380" font-size="11.5" fill="#B5342A">Unimplemented platforms raise loudly. Claiming cross-platform without a measured suite would be the same sin as editing a benchmark task after the baseline.</text>
+    </svg>
+    <figcaption>
+      <b>Seams are where we cut, not where we decorate.</b> The dashed boxes do not exist yet —
+      they are drawn because the interface above them is already shaped to accept them, which is
+      the only reason the interface is worth having.
+    </figcaption>
+  </figure>
+</section>
+
+<section>
+  <div class="col">
+    <h2>The budget</h2>
+    <p class="headline">Where one step actually goes</p>
+    <p>
+      Perception runs concurrently — the screen capture and the accessibility walk have no
+      dependency on each other, which is the entire reason the environment layer is async while the
+      adapter beneath it is not.
+    </p>
+  </div>
+
+  <div class="budget">
+    <div class="bar">
+      <div style="width:3.4%;  background:var(--measured)"></div>
+      <div style="width:1.4%;  background:var(--measured); opacity:.6"></div>
+      <div style="width:68.2%; background:var(--estimate)">plan — the model call</div>
+      <div style="width:22.7%; background:var(--muted)">settle</div>
+      <div style="width:1.1%;  background:var(--ink-2)"></div>
+      <div style="width:3.2%;  background:var(--surface-2)"></div>
+    </div>
+    <div class="key">
+      <span><i class="sw" style="background:var(--measured)"></i> perception 77 ms (measured, concurrent)</span>
+      <span><i class="sw" style="background:var(--estimate)"></i> model call ~1,500 ms (estimated — not yet measured)</span>
+      <span><i class="sw" style="background:var(--muted)"></i> settle wait 500 ms (blind sleep, Phase B target)</span>
+      <span><i class="sw" style="background:var(--ink-2)"></i> verify ~25 ms</span>
+    </div>
+  </div>
+
+  <div class="col">
+    <p>
+      Two things are visible here that matter. The model is roughly seventy percent of a step, so
+      calls-per-step dominates everything else. And the second largest item is not clever at all —
+      it is a blind half-second sleep waiting for the interface to settle, which Phase&nbsp;B replaces
+      with polling until the screen stops changing.
+    </p>
+    <div class="callout">
+      <span class="ui">The honesty rule</span>
+      <p>
+        Amber means estimated, teal means measured on this machine. Every guess in this system gets
+        replaced by a measurement and the spec gets corrected — including when the measurement is
+        embarrassing. Two already were.
+      </p>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="col">
+    <h2>Findings</h2>
+    <p class="headline">What measurement has already overturned</p>
+    <table>
+      <tr><th style="width:30%">Assumption</th><th style="width:30%">Reality</th><th>Consequence</th></tr>
+      <tr>
+        <td>Retina ratio is 1.778 — panel is 2560×1600</td>
+        <td class="n m">exactly 2.0</td>
+        <td>Screen capture returns the <em>framebuffer</em> (2880×1800), not the panel. Three resolutions exist; the panel is a red herring. Dividing by it would have put every click 11% off.</td>
+      </tr>
+      <tr>
+        <td>pyautogui can send keystrokes</td>
+        <td class="n" style="color:var(--mark)">silently wrong</td>
+        <td><code>cmd+a</code> arrived as a literal <code>a</code>; <code>cmd+s</code> stopped saving; “Reviewed” typed as “Rviw”. No exception — it reads exactly like the model choosing badly. Replaced with CGEvent and explicit modifier flags.</td>
+      </tr>
+      <tr>
+        <td>Screen capture ~80 ms</td>
+        <td class="n m">55 ms warm<br>189 ms cold</td>
+        <td>First reading said 585 ms, which was cold start. Swapping a general resampling filter for an integer box-reduce cut it nearly in half and shrank the PNG from 205 KB to 91 KB.</td>
+      </tr>
+      <tr>
+        <td>OCR is needed for blind apps</td>
+        <td class="n" style="color:var(--estimate)">deferred</td>
+        <td>The planner is already a vision model, and on native apps the accessibility tree <em>is</em> the text oracle. We instrument the trigger instead and build the remedy only if it fires.</td>
+      </tr>
+    </table>
+  </div>
+</section>
+
+<section>
+  <div class="col">
+    <h2>The path</h2>
+    <p class="headline">Eight gates, each one closed before the next opens</p>
+    <p>
+      The ordering is not bureaucracy. Routing bugs are trivial to find when the nodes only print
+      and miserable to find when a real desktop and a real model are also in the picture — so the
+      graph gets tested against recorded observations before it is allowed near either.
+    </p>
+  </div>
+
+  <div class="gates">
+    <div class="gate done"><span class="num">A0</span><span class="what">Permissions<small>screen capture, accessibility, and the capture-to-point ratio measured rather than assumed</small></span><span class="st">passed</span></div>
+    <div class="gate done"><span class="num">A1</span><span class="what">Types, seams, guardrails<small>drive TextEdit end to end through the interface, with the app allowlist enforced</small></span><span class="st">passed</span></div>
+    <div class="gate now"><span class="num">A2</span><span class="what">Perception<small>accessibility walk, filtering, numbered overlay — verified by eye across ten apps</small></span><span class="st">in progress</span></div>
+    <div class="gate todo"><span class="num">A3</span><span class="what">Graph skeleton<small>routing, cycles, step cap, loop detection — stub nodes, no model</small></span><span class="st">no API key needed</span></div>
+    <div class="gate todo"><span class="num">A4</span><span class="what">Real nodes<small>first actual model call; structured output under a real schema</small></span><span class="st">ahead</span></div>
+    <div class="gate todo"><span class="num">A5</span><span class="what">Recovery and budgets<small>survive a dialog stealing focus; abort cleanly when money runs out</small></span><span class="st">ahead</span></div>
+    <div class="gate todo"><span class="num">A6</span><span class="what">Benchmark<small>fifteen tasks with programmatic checkers — the baseline is recorded and the tasks freeze</small></span><span class="st">the important one</span></div>
+    <div class="gate todo"><span class="num">A7</span><span class="what">Variance<small>three repeat runs: noise larger than the effect cannot support a claim</small></span><span class="st">ahead</span></div>
+    <div class="gate todo"><span class="num">A8</span><span class="what">Demo<small>forty seconds of a freeform task completing, on video</small></span><span class="st">ahead</span></div>
+  </div>
+
+  <div class="col">
+    <div class="callout">
+      <span class="ui">Why A6 is the one that matters</span>
+      <p>
+        Everything before it builds a thing. A6 is where the thing acquires a number. After that
+        the tasks are frozen — tuning the agent is the project, tuning the benchmark is fraud —
+        and Phase B can begin, where each optimization is measured as a delta against a baseline
+        that can no longer move.
+      </p>
+    </div>
+  </div>
+</section>
+
+<footer>
+  <p>
+    os-agent — measured on Apple M1, 8 GB, 1440×900 points. Teal figures are measured on this
+    machine; amber figures are still estimates awaiting their first real run.
+  </p>
+</footer>
+
+</div>

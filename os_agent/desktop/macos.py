@@ -13,6 +13,14 @@ import time
 import pyautogui
 import Quartz
 from AppKit import NSScreen, NSWorkspace
+from ApplicationServices import (
+    AXUIElementCopyAttributeValue,
+    AXUIElementCreateApplication,
+    AXUIElementSetMessagingTimeout,
+    AXValueGetValue,
+    kAXValueCGPointType,
+    kAXValueCGSizeType,
+)
 from PIL import Image
 
 from os_agent.desktop.base import NotOnThisPlatform
@@ -70,6 +78,35 @@ _KEYCODES: dict[str, int] = {
 _EVENT_GAP_S = 0.006
 
 _LTR_MARK = "‎"
+
+# Perception cost controls (CLAUDE.md §8.2).
+_AX_TIMEOUT_S = 0.5
+_MAX_DEPTH = 20
+_MAX_NODES = 300
+_MAX_NAME = 120
+
+
+def _attr(node, name: str):
+    err, value = AXUIElementCopyAttributeValue(node, name, None)
+    return value if err == 0 else None
+
+
+def _bbox(node) -> tuple[int, int, int, int] | None:
+    """AXPosition / AXSize are WRAPPED AXValue objects, not plain structs.
+
+    Reading node.x or node.width raises, silently producing empty geometry for
+    every node while roles and names still look correct. AXValueGetValue is the
+    unwrap. This cost an hour at A0; it is why the comment is this long.
+    """
+    pos_v, size_v = _attr(node, "AXPosition"), _attr(node, "AXSize")
+    if pos_v is None or size_v is None:
+        return None
+    ok_p, pos = AXValueGetValue(pos_v, kAXValueCGPointType, None)
+    ok_s, size = AXValueGetValue(size_v, kAXValueCGSizeType, None)
+    if not (ok_p and ok_s):
+        return None
+    x, y = int(pos.x), int(pos.y)
+    return x, y, x + int(size.width), y + int(size.height)
 
 
 def _source():
@@ -187,15 +224,76 @@ class MacOSAdapter:
     def wait(self, seconds: float) -> None:
         time.sleep(seconds)
 
-    # -- A2 ----------------------------------------------------------------
+    # -- perception (A2) ---------------------------------------------------
     def raw_tree(self) -> list[RawNode]:
-        # GOTCHA found at A0, recorded so A2 does not rediscover it:
-        # AXPosition and AXSize do NOT return plain points. They return wrapped
-        # AXValue objects and node.x / node.width silently raise. Unwrap with
-        #     ok, pt = AXValueGetValue(v, kAXValueCGPointType, None)
-        # Reading them directly is why a naive dump shows empty geometry for
-        # every node while still printing correct roles and names.
-        raise NotOnThisPlatform("raw_tree is A2 (CLAUDE.md §9). A1 needs no perception.")
+        """Walk the focused window of the frontmost app into flat RawNodes.
+
+        Unfiltered on purpose: filtering and numbering are platform-neutral and
+        live in perception/elements.py (CLAUDE.md §4.10).
+
+        Four cost controls, which are design and not optimization — every
+        attribute read below is an IPC round-trip into another process:
+          1. focused window only, never the whole desktop
+          2. depth cap + node cap
+          3. prune zero-size / offscreen subtrees BEFORE descending
+          4. 0.5s messaging timeout so one hung app cannot stall a step
+        """
+        app = NSWorkspace.sharedWorkspace().frontmostApplication()
+        if app is None:
+            return []
+        ref = AXUIElementCreateApplication(app.processIdentifier())
+        AXUIElementSetMessagingTimeout(ref, _AX_TIMEOUT_S)
+
+        err, windows = AXUIElementCopyAttributeValue(ref, "AXWindows", None)
+        if err != 0 or not windows:
+            return []
+
+        out: list[RawNode] = []
+        sw, sh = self.screen_size_points()
+        self._walk(windows[0], 0, out, sw, sh)
+        return out
+
+    def _walk(self, node, depth: int, out: list[RawNode], sw: int, sh: int) -> None:
+        if depth > _MAX_DEPTH or len(out) >= _MAX_NODES:
+            return
+
+        role = _attr(node, "AXRole")
+        if role is None:
+            return
+
+        bbox = _bbox(node)
+        # Prune BEFORE descending: a window scrolled off-screen can hold
+        # hundreds of children, and each one costs IPC to even look at.
+        if bbox is not None:
+            x0, y0, x1, y1 = bbox
+            if x1 <= 0 or y1 <= 0 or x0 >= sw or y0 >= sh:
+                return
+            if (x1 - x0) <= 0 or (y1 - y0) <= 0:
+                return
+
+        name = ""
+        for a in ("AXTitle", "AXDescription", "AXValue"):
+            v = _attr(node, a)
+            if v:
+                name = str(v).replace(_LTR_MARK, "").strip()
+                break
+
+        enabled = _attr(node, "AXEnabled")
+        out.append(
+            RawNode(
+                role=str(role),
+                name=name[:_MAX_NAME],
+                bbox=bbox,
+                enabled=True if enabled is None else bool(enabled),
+                focused=bool(_attr(node, "AXFocused") or False),
+                depth=depth,
+            )
+        )
+
+        children = _attr(node, "AXChildren")
+        if children:
+            for child in children:
+                self._walk(child, depth + 1, out, sw, sh)
 
     def ocr(self, image_png: bytes, bbox: tuple[int, int, int, int]) -> str:
         # A2: VNRecognizeTextRequest (Apple Vision) — on-device, Neural Engine,
