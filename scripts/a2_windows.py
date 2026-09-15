@@ -13,7 +13,10 @@ Boxes are offset into window-local coordinates: AX reports screen-global
 points, and we are capturing one window, not the screen.
 """
 
+import os
+import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 import Quartz
@@ -32,6 +35,21 @@ from ApplicationServices import (  # isort: skip
 
 OUT = Path("runs/a2_som")
 MIN_W, MIN_H = 260, 180
+
+# System helper windows: real entries in the window list, no real UI. They are
+# noise in a gate whose output a human has to read.
+SKIP_OWNERS = {
+    "WindowManager", "loginwindow", "Spotlight", "Wi-Fi", "Control Centre",
+    "Control Center", "LocalAuthenticationRemoteService", "Open and Save Panel Service",
+    "Notification Centre", "Notification Center", "Dock", "universalaccessd",
+    "CoreServicesUIAgent", "TextInputMenuAgent", "Creative Cloud",
+}
+
+
+def is_blank(img: Image.Image) -> bool:
+    """A window that launched but never drew renders solid black or white."""
+    lo, hi = img.convert("L").resize((32, 32)).getextrema()
+    return (hi - lo) < 12
 
 
 def on_screen_windows() -> list[dict]:
@@ -55,18 +73,26 @@ def on_screen_windows() -> list[dict]:
 
 
 def grab_window(win_id: int) -> Image.Image | None:
-    img = Quartz.CGWindowListCreateImage(
-        Quartz.CGRectNull,
-        Quartz.kCGWindowListOptionIncludingWindow,
-        win_id,
-        Quartz.kCGWindowImageBoundsIgnoreFraming,
-    )
-    if img is None:
-        return None
-    w, h = Quartz.CGImageGetWidth(img), Quartz.CGImageGetHeight(img)
-    bpr = Quartz.CGImageGetBytesPerRow(img)
-    raw = Quartz.CGDataProviderCopyData(Quartz.CGImageGetDataProvider(img))
-    return Image.frombuffer("RGBA", (w, h), bytes(raw), "raw", "BGRA", bpr, 1)
+    """Capture one window by id.
+
+    MEASURED A2: CGWindowListCreateImage returns None for nearly every window on
+    macOS 15 — same deprecated family as CGDisplayCreateImage (§8.2). The
+    `screencapture` CLI still renders them reliably, so that is the path we use
+    here. Slower (subprocess + disk) but this is a diagnostic, not the loop.
+    """
+    with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as fh:
+        path = fh.name
+    try:
+        r = subprocess.run(
+            ["screencapture", "-x", "-o", "-l", str(win_id), path],
+            capture_output=True, timeout=20, check=False,
+        )
+        if r.returncode != 0 or not os.path.exists(path) or os.path.getsize(path) == 0:
+            return None
+        return Image.open(path).convert("RGBA").copy()
+    finally:
+        if os.path.exists(path):
+            os.remove(path)
 
 
 def ax_nodes_for(pid: int, bounds: dict) -> list[RawNode]:
@@ -119,6 +145,8 @@ def main() -> int:
 
     for w in on_screen_windows():
         owner = str(w.get("kCGWindowOwnerName", "?"))
+        if owner in SKIP_OWNERS:
+            continue
         pid = int(w.get("kCGWindowOwnerPID", 0))
         b = w.get("kCGWindowBounds", {})
         wx, wy = int(b["X"]), int(b["Y"])
@@ -134,6 +162,10 @@ def main() -> int:
             img = img.reduce(int(ratio))
         elif img.size != (ww, wh):
             img = img.resize((ww, wh), Image.LANCZOS)
+
+        if is_blank(img):
+            print(f"  {owner[:23]:<24} {'—':>5} {'—':>5} {f'{ww}x{wh}':>13}  never drew")
+            continue
 
         nodes = ax_nodes_for(pid, b)
         els = to_elements(nodes, app=owner)

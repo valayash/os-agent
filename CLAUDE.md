@@ -217,10 +217,28 @@ of them: a window on another Space has no renderable backing store.
 
 So the agent is blind to everything outside the current Space, and no API works around it.
 
-> **Benchmark runs happen with apps sharing one Space. No fullscreen, no separate
-> Desktops.** This belongs in the run preconditions next to "a human is at the keyboard" —
-> both are environment requirements the harness should assert before starting, not
-> discover halfway through a suite.
+**Stage Manager is the third wall.** Measured at A2: with Stage Manager on, every
+non-active app is a ~120 px thumbnail in the side strip, paired with a `WindowManager`
+window of identical bounds. The apps are running and their windows are listed, but at
+thumbnail size — there is no real UI to see or click.
+
+    System Settings    83x137     WindowManager    83x137
+    Finder            115x136     WindowManager   115x136
+    TextEdit           98x116     WindowManager    98x116
+
+Three separate macOS windowing features each make the agent blind, and all three fail
+quietly rather than erroring:
+
+| Feature | Effect |
+|---|---|
+| Fullscreen | isolates a Space; every other window becomes unrenderable |
+| Separate Desktops | same |
+| Stage Manager | non-active apps shrink to ~120 px thumbnails |
+
+> **Run preconditions — the harness asserts these before a suite starts, and aborts if any
+> fails.** Apps share one Space · no fullscreen · **Stage Manager off** · a human at the
+> keyboard (§5.3). Discovering any of these halfway through a suite invalidates the run,
+> and none of them announces itself.
 
 ### 5.2 Fixed-size vs bounded
 
