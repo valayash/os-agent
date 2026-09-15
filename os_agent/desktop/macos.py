@@ -8,6 +8,9 @@
 """
 
 import io
+import os
+import subprocess
+import tempfile
 import time
 
 import pyautogui
@@ -127,6 +130,48 @@ class MacOSAdapter:
         frame = NSScreen.mainScreen().frame()
         return int(frame.size.width), int(frame.size.height)
 
+    # Capture has two paths. MEASURED A2: CGDisplayCreateImage is deprecated on
+    # macOS 14+ and returns None intermittently — it did so mid-run on this
+    # machine while Screen Recording was definitely granted (A0 passed and the
+    # previous capture in the same process had just succeeded). Allocating a
+    # 20.7 MB framebuffer every few seconds on 8 GB is the likely trigger.
+    #
+    # So: try the fast in-process path, then fall back to the `screencapture`
+    # CLI, which is slower (subprocess + disk) but is the known-good path from
+    # A0. A capture that raises kills a whole benchmark run; a capture that is
+    # 200 ms slower costs 200 ms. Count the fallbacks so the rate is visible.
+    fallback_captures = 0
+
+    def _grab(self) -> Image.Image:
+        for _ in range(2):
+            img = Quartz.CGDisplayCreateImage(Quartz.CGMainDisplayID())
+            if img is not None:
+                px_w = Quartz.CGImageGetWidth(img)
+                px_h = Quartz.CGImageGetHeight(img)
+                bpr = Quartz.CGImageGetBytesPerRow(img)
+                raw = Quartz.CGDataProviderCopyData(Quartz.CGImageGetDataProvider(img))
+                return Image.frombuffer("RGBA", (px_w, px_h), bytes(raw), "raw", "BGRA", bpr, 1)
+            time.sleep(0.15)
+
+        MacOSAdapter.fallback_captures += 1
+        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as fh:
+            path = fh.name
+        try:
+            r = subprocess.run(
+                ["screencapture", "-x", "-t", "png", "-D", "1", path],
+                capture_output=True, timeout=20, check=False,
+            )
+            if r.returncode != 0 or not os.path.getsize(path):
+                raise RuntimeError(
+                    "Both capture paths failed. CGDisplayCreateImage returned None twice "
+                    f"and screencapture exited {r.returncode}. Check Screen Recording "
+                    "permission with scripts/a0_gate.py."
+                )
+            return Image.open(path).convert("RGBA").copy()
+        finally:
+            if os.path.exists(path):
+                os.remove(path)
+
     def capture(self) -> tuple[bytes, float]:
         """(PNG at POINT resolution, measured capture:point ratio).
 
@@ -135,17 +180,8 @@ class MacOSAdapter:
         2880x1800 framebuffer over 1440x900 points on a 2560x1600 panel. The
         ratio is measured every capture and nothing hardcodes it (§5.1).
         """
-        img = Quartz.CGDisplayCreateImage(Quartz.CGMainDisplayID())
-        if img is None:
-            raise RuntimeError(
-                "CGDisplayCreateImage returned None — Screen Recording permission "
-                "is probably not granted. Run scripts/a0_gate.py."
-            )
-        px_w = Quartz.CGImageGetWidth(img)
-        px_h = Quartz.CGImageGetHeight(img)
-        bpr = Quartz.CGImageGetBytesPerRow(img)
-        raw = Quartz.CGDataProviderCopyData(Quartz.CGImageGetDataProvider(img))
-        pil = Image.frombuffer("RGBA", (px_w, px_h), bytes(raw), "raw", "BGRA", bpr, 1)
+        pil = self._grab()
+        px_w, px_h = pil.size
 
         pt_w, pt_h = self.screen_size_points()
         ratio = px_w / pt_w
