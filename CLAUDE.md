@@ -209,6 +209,19 @@ Consequences, and they are not small:
 3. Switching apps is therefore not in the agent's action space. Tasks are authored so the
    app they need is already in front.
 
+**A fullscreen app isolates its Space, and that is a harder wall than focus.** Measured at
+A2: with one app fullscreen, `CGWindowListCopyWindowInfo(kCGWindowListOptionOnScreenOnly)`
+returns only that app's window — every other app is off-Space. Listing with
+`kCGWindowListOptionAll` finds them, but `CGWindowListCreateImage` returns `None` for all
+of them: a window on another Space has no renderable backing store.
+
+So the agent is blind to everything outside the current Space, and no API works around it.
+
+> **Benchmark runs happen with apps sharing one Space. No fullscreen, no separate
+> Desktops.** This belongs in the run preconditions next to "a human is at the keyboard" —
+> both are environment requirements the harness should assert before starting, not
+> discover halfway through a suite.
+
 ### 5.2 Fixed-size vs bounded
 
 > **Fields that enter the prompt must be fixed-size. Bookkeeping fields need only be bounded.**
