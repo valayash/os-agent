@@ -147,9 +147,18 @@ Free now, expensive later. Make them from the first commit.
 
 ### 5.1 The coordinate contract
 
-This display is **2560 × 1600 physical pixels** presented as **1440 × 900 points**.
-The ratio is **1.778, not 2.0** — scaled Retina modes are not clean 2×, so "divide by two"
-produces boxes ~11% off: close enough to look right, wrong enough that every click misses.
+**Measured at A0 on this machine — three resolutions exist, and only two matter:**
+
+| Surface | Size | Used by |
+|---|---|---|
+| Physical panel | 2560 × 1600 | **nobody — a red herring** |
+| Framebuffer (what capture returns) | 2880 × 1800 | screen capture |
+| Logical points | 1440 × 900 | AX, pyautogui, prompts |
+
+**Measured capture:point ratio = exactly 2.0000** (x and y agree). `screencapture` returns
+the *framebuffer*, not the panel — macOS renders 2880×1800 and downsamples to the 2560×1600
+panel in hardware, so the panel spec never enters our arithmetic. Reading the panel
+resolution off `system_profiler` and dividing by it would put every click off by 11%.
 
 | Subsystem | Space |
 |---|---|
@@ -162,9 +171,12 @@ produces boxes ~11% off: close enough to look right, wrong enough that every cli
 > before SoM rendering. `Observation.meta["scale"]` records the factor. Pixels exist inside
 > exactly one function — the adapter's capture call — and nowhere else.
 
-**Measure the ratio; never assume it.** `backingScaleFactor` reports 2.0 on this display
-while the true capture-to-point ratio is 1.778, because macOS renders at 2880×1800 and the
-panel is 2560×1600. A0 measures it empirically for this reason.
+**Measure the ratio; never assume it — including when it comes out clean.** Here the
+measured ratio happens to equal `backingScaleFactor` (2.0), so this display is effectively
+in a 2× mode from our side. That is a property of the user's current display setting, not a
+law: change Displays → Resolution and the framebuffer changes with it. The adapter's
+`capture()` therefore *returns* the measured ratio (`DesktopAdapter.capture -> (png, ratio)`)
+and `Observation.meta["scale"]` records it per observation. Nothing hardcodes 2.
 
 A unit test asserts screenshot size equals the screen's point dimensions. If it fails, stop.
 
@@ -441,7 +453,9 @@ frontmost:  NSWorkspace.frontmostApplication() → pid, bundle_id
 tree:       AXUIElementCreateApplication(pid) → AXWindows → focused window
               └─ recurse AXChildren, reading
                  AXRole, AXTitle | AXValue | AXDescription, AXPosition, AXSize, AXEnabled
-capture:    CGWindowListCreateImage (in-process, ~80 ms)
+capture:    CGDisplayCreateImage (in-process, no subprocess, no disk)
+            MEASURED A1: 55 ms warm / 189 ms cold, 1440x900 PNG, ~91 KB
+            stages: CGDisplayCreateImage 18 · frombuffer 6 · reduce(2) 11 · PNG 13
             — A0 uses the `screencapture` CLI instead: a known-good permission canary
 ocr:        VNRecognizeTextRequest (Apple Vision)
 input:      pyautogui, FAILSAFE on
@@ -503,8 +517,19 @@ If boxes are wrong, nothing downstream can work.
 `done` / `fail` never reach the executor — the graph terminates on them.
 A list of actions executes in order — Phase B's action grouping, already free.
 
-pyautogui's `typewrite` is slow and mangles non-ASCII. If typing becomes a bottleneck,
-drop to `CGEventKeyboardSetUnicodeString` inside `desktop/macos.py` — the seam contains it.
+**MEASURED A1 — pyautogui's keyboard is not usable on macOS, and we already swapped it.**
+It sends a modifier key-down and lets the app infer the chord, so `hotkey("command","a")`
+arrives as a literal `a`: Select All silently becomes typing a character and `cmd+s`
+silently stops saving. Fast typing also drops characters — `"Reviewed"` arrived as `"Rviw"`.
+All of it is SILENT: no exception, just wrong input that reads exactly like the model
+choosing badly. That is the worst failure mode this project can have, because it would be
+attributed to the model for weeks.
+
+`desktop/macos.py` now sends keys via `CGEventCreateKeyboardEvent` with explicit flags, and
+types via `CGEventKeyboardSetUnicodeString` (unicode-safe, measured 13.9 ms/char). **The
+modifier key-up must carry `flags=0`** — leave the mask set and Command stays latched, so
+every subsequent character becomes a menu shortcut and the text never appears at all.
+Mouse stays on pyautogui; that half is fine.
 
 ### 8.6 `actions/policy.py` — guardrails · **built in A1**
 
@@ -632,6 +657,13 @@ Checkers read from three places, and nothing else:
 | Filesystem | file exists / renamed / contents match |
 | Document files | `odfpy` / `openpyxl` / `pypdf` parse the saved file |
 | `defaults read <domain>` | a preference actually changed |
+
+**Applications silently rewrite what the agent types.** TextEdit autocapitalized typed
+`alpha` to `Alpha` during A1 — substitutions (capitalization, smart quotes, smart dashes)
+are on by default and will fail a checker for reasons that look like agent error. Two rules:
+seed file content from `setup()` in Python rather than by typing it, and make any checker
+that compares typed prose explicit about case and punctuation. A task whose success depends
+on an app's substitution settings is not a task, it is a coin flip.
 
 **Use LibreOffice, not Numbers/Pages.** LibreOffice is native on Apple Silicon and saves
 `.ods`/`.odt`, which parse cleanly in Python. Apple's iWork saves opaque bundles that are
@@ -883,6 +915,9 @@ Listed so Phase A decisions stay compatible. Each becomes one ablation row.
 - [ ] LangSmith tracing live
 - [ ] Guardrails enforced (app allowlist, sandbox, approval tiers, step cap, budgets, rpm)
 - [ ] Demo video recorded
+- [ ] **Accessibility permission revoked from Claude.app** — granted for Phase A
+      development only (A0). It is machine-wide: mouse, keyboard, and the UI of every
+      other app. Revoke in System Settings → Privacy & Security → Accessibility.
 
 **Then, and only then, Phase B begins.**
 

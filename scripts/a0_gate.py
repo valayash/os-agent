@@ -85,13 +85,13 @@ except Exception as e:
 # --- 3. accessibility tree --------------------------------------------------
 print("\n[3] Accessibility — AXUIElement")
 try:
+    from AppKit import NSWorkspace
     from ApplicationServices import (
         AXIsProcessTrusted,
         AXUIElementCopyAttributeValue,
         AXUIElementCreateApplication,
         AXUIElementSetMessagingTimeout,
     )
-    from AppKit import NSWorkspace
 
     trusted = bool(AXIsProcessTrusted())
     print(f"        AXIsProcessTrusted() = {trusted}")
@@ -164,7 +164,7 @@ if cap_w and pt_w:
               f"({rx:.4f}). Assuming it would put every click off by "
               f"{abs(1 - backing / rx) * 100:.1f}%.")
     else:
-        print(f"        >>> ratio equals backingScaleFactor — display is in native mode.")
+        print("        >>> ratio equals backingScaleFactor — display is in native mode.")
 else:
     record("ratio", False, "need both capture and point dimensions")
 
