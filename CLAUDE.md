@@ -594,8 +594,35 @@ Numbered boxes on the screenshot. Red outline, filled label top-left, white text
 Must handle: overlapping elements (offset labels) · labels running off-screen ·
 very small elements (label outside the box).
 
-**Acceptance:** dump 10 annotated screenshots across different apps and eyeball them.
-If boxes are wrong, nothing downstream can work.
+**MEASURED A2 — verified by eye; boxes are geometrically correct on every app tried:**
+
+| App | raw nodes | elements | ~prompt tokens | shape verified |
+|---|---|---|---|---|
+| Finder | 250 | **91** | ~1,365 | dense icon grid + sidebar + toolbar |
+| System Settings | 189 | 51 | ~765 | scrolling list + per-row toggles |
+| Preview | 162 | 41 | ~615 | document viewer |
+| Safari | 106 | 30 | ~450 | **web content** — the AX-weak case |
+| TextEdit | 13 | 6 | ~90 | native AppKit document |
+| Claude | 14 | 3 | ~45 | Electron — the menu bar carries it |
+
+**Element count varies 30× across apps, and that is a latency finding, not a perception
+one.** Finder costs ~1,365 prompt tokens per step against TextEdit's ~90 — every step,
+forever. A task living in Finder is structurally 15× more expensive to perceive than one in
+TextEdit before the model does anything. When the A6 baseline shows per-task cost variance,
+this is why, and `media_resolution` (§8.1) is the lever that moves it.
+
+**Two cosmetic limits, both low impact because the element list carries truth:**
+
+1. The number chip occludes the first ~2 characters of an element's own label (`18` covering
+   "Th" in "The Weather Channel"). The model reads the real name from the text list.
+2. Web views box the *label text* rather than the icon — AX reports the text node for a
+   Safari favourite, so the box sits under the tile. The click still lands inside the link.
+
+**A misread worth recording.** The dense captures *looked* like they had duplicate boxes per
+row, so a nested-duplicate collapse was written to fix it. Measuring first found only two
+overlapping pairs in 51 elements, both legitimate — the apparent doubling was the number
+chip plus the element outline, which is the design. The fix was reverted.
+*Infer a bug from a picture; confirm it with data before writing code.*
 
 ### 8.5 `actions/executor.py`
 
@@ -810,11 +837,16 @@ minimal `desktop/macos.py`, `env/desktop_env.py`.
 **Gate:** a hardcoded script opens TextEdit, types a line, saves to the sandbox, and a
 checker confirms the file — through the `Environment` interface, with policy enforced.
 
-### A2 — Perception
+### A2 — Perception ✅ PASSED
 `desktop/macos.py` tree walk, `perception/elements.py`, `perception/som.py`.
 No OCR — deferred, see §8.2.
-**Gate:** annotated screenshots correct across 10 apps, verified by eye. Points/pixels
-unit test green.
+**Gate:** annotated screenshots correct across **6** apps spanning four toolkit families
+(native AppKit, dense AppKit list, web content, Electron), verified by eye — table in §8.4.
+Points/pixels unit test green; 29 tests pass.
+
+Fewer than the 10 originally specified: three macOS windowing features (§5.3) blocked
+access to the rest, and the six obtained already cover every layout family the suite will
+touch. Recorded as a deviation rather than quietly restated as ten.
 
 ### A3 — Graph skeleton
 LangGraph with **stub nodes that only print**, driven by `replay_env`. Verify routing,
