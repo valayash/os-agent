@@ -602,6 +602,7 @@ very small elements (label outside the box).
 | System Settings | 189 | 51 | ~765 | scrolling list + per-row toggles |
 | Preview | 162 | 41 | ~615 | document viewer |
 | Safari | 106 | 30 | ~450 | **web content** — the AX-weak case |
+| WhatsApp | 49 | 25 | ~375 | virtualized list — one button per row, the cleanest tree tested |
 | TextEdit | 13 | 6 | ~90 | native AppKit document |
 | Claude | 14 | 3 | ~45 | Electron — the menu bar carries it |
 
@@ -840,7 +841,7 @@ checker confirms the file — through the `Environment` interface, with policy e
 ### A2 — Perception ✅ PASSED
 `desktop/macos.py` tree walk, `perception/elements.py`, `perception/som.py`.
 No OCR — deferred, see §8.2.
-**Gate:** annotated screenshots correct across **6** apps spanning four toolkit families
+**Gate:** annotated screenshots correct across **7** apps spanning five toolkit families
 (native AppKit, dense AppKit list, web content, Electron), verified by eye — table in §8.4.
 Points/pixels unit test green; 29 tests pass.
 
