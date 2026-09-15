@@ -13,6 +13,8 @@ from os_agent.actions.executor import ApproveFn, Executor
 from os_agent.bench import tasks
 from os_agent.desktop.base import DesktopAdapter, NotOnThisPlatform
 from os_agent.env.base import Environment
+from os_agent.perception.elements import to_elements
+from os_agent.perception.som import annotate
 from os_agent.types import Action, Observation
 
 log = structlog.get_logger(__name__)
@@ -53,12 +55,13 @@ class DesktopEnv(Environment):
         (png, ratio), nodes = await asyncio.gather(png_task, tree_task)
 
         name, bundle = self.adapter.frontmost_app()
-        elements = []  # A2: perception/elements.py turns nodes -> Elements
+        elements = to_elements(nodes, app=bundle)
+        annotated = annotate(png, elements) if elements else png
         perception_ms = (time.perf_counter() - t0) * 1000
 
         return Observation(
             screenshot=png,
-            annotated=png,  # A2: som.py draws the numbered boxes
+            annotated=annotated,
             elements=elements,
             meta={
                 "app": name,
@@ -66,7 +69,8 @@ class DesktopEnv(Environment):
                 "scale": ratio,
                 "raw_nodes": len(nodes),
                 "perception_ms": round(perception_ms, 1),
-                "perception": "unimplemented (A2)" if not nodes else "ok",
+                "elements": len(elements),
+                "sparse": len(elements) < 3,
             },
         )
 
@@ -77,8 +81,8 @@ class DesktopEnv(Environment):
         except NotOnThisPlatform:
             return []
 
-    async def act(self, actions: list[Action]) -> None:
-        obs_elements = []  # A2 will pass the live element list through
+    async def act(self, actions: list[Action], elements: list | None = None) -> None:
+        obs_elements = elements or []
         self.executor.run(
             actions,
             obs_elements,

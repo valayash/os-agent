@@ -144,6 +144,7 @@ Free now, expensive later. Make them from the first commit.
 | Max 50 steps per task, hard cap | Runaway loops cost real money |
 | Task AND suite cost budgets, enforced in code | Abort when exceeded |
 | Agent may only act on apps in `TaskSpec.apps` | It drives the real machine |
+| **A human must be present at the keyboard** | macOS suppresses programmatic focus changes during unattended automation — see §5.3 |
 
 ### 5.1 The coordinate contract
 
@@ -179,6 +180,34 @@ law: change Displays → Resolution and the framebuffer changes with it. The ada
 and `Observation.meta["scale"]` records it per observation. Nothing hardcodes 2.
 
 A unit test asserts screenshot size equals the screen's point dimensions. If it fails, stop.
+
+### 5.3 Focus cannot be taken programmatically — MEASURED A2
+
+macOS permits a background process to bring an application forward only shortly after real
+human input. During a long unattended automation run it suppresses focus changes, and
+**every mechanism fails silently** — each of these returned success while doing nothing:
+
+| Mechanism | Result |
+|---|---|
+| `open -a App` (fresh launch, even with a document) | rc=0, app stays behind |
+| `NSRunningApplication.activateWithOptions_` | returns `True`, no effect |
+| `AXUIElementPerformAction(window, "AXRaise")` | `-25205` |
+| `osascript -e 'tell application "X" to activate'` | rc=0, no effect |
+| synthetic `cmd+tab` | delivered, no switch |
+
+The same `open -a TextEdit <file>` that closed the A1 gate was blocked an hour later. The
+variable was not the code — it was whether a person had touched the machine recently.
+
+Consequences, and they are not small:
+
+1. **`TaskSpec.setup()` cannot be trusted to foreground an app unattended.** Setup must
+   verify the frontmost bundle id afterwards and fail the task loudly rather than letting
+   the agent act on whatever happens to be in front. The policy allowlist already refuses
+   that, so this surfaces as a refusal rather than as damage — but it is a failed run.
+2. **This is a second, independent reason not to run unattended.** §11 forbids it for
+   safety; this forbids it for correctness.
+3. Switching apps is therefore not in the agent's action space. Tasks are authored so the
+   app they need is already in front.
 
 ### 5.2 Fixed-size vs bounded
 

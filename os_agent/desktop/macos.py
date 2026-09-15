@@ -244,13 +244,40 @@ class MacOSAdapter:
         ref = AXUIElementCreateApplication(app.processIdentifier())
         AXUIElementSetMessagingTimeout(ref, _AX_TIMEOUT_S)
 
-        err, windows = AXUIElementCopyAttributeValue(ref, "AXWindows", None)
-        if err != 0 or not windows:
-            return []
-
         out: list[RawNode] = []
         sw, sh = self.screen_size_points()
-        self._walk(windows[0], 0, out, sw, sh)
+
+        # The menu bar, TOP LEVEL ONLY.
+        # Found at A2 by looking at an annotated screenshot: walking AXWindows
+        # alone leaves File / Edit / Format / View unnumbered, and on macOS the
+        # menu bar is how most things are actually done — Save As, Make Plain
+        # Text, Export. An agent that cannot see it cannot drive a Mac app.
+        # We do NOT descend into the menus: that is hundreds of IPC round-trips
+        # for items that are not on screen. Clicking a top-level item opens the
+        # menu, and its contents appear in the NEXT observation as a real
+        # window. One cheap hop instead of one expensive eager walk.
+        err, menubar = AXUIElementCopyAttributeValue(ref, "AXMenuBar", None)
+        if err == 0 and menubar:
+            err, items = AXUIElementCopyAttributeValue(menubar, "AXChildren", None)
+            if err == 0 and items:
+                for item in items:
+                    bbox = _bbox(item)
+                    if bbox is None:
+                        continue
+                    title = _attr(item, "AXTitle")
+                    out.append(
+                        RawNode(
+                            role=str(_attr(item, "AXRole") or "AXMenuBarItem"),
+                            name=str(title or "").replace(_LTR_MARK, "").strip()[:_MAX_NAME],
+                            bbox=bbox,
+                            enabled=True,
+                            depth=1,
+                        )
+                    )
+
+        err, windows = AXUIElementCopyAttributeValue(ref, "AXWindows", None)
+        if err == 0 and windows:
+            self._walk(windows[0], 0, out, sw, sh)
         return out
 
     def _walk(self, node, depth: int, out: list[RawNode], sw: int, sh: int) -> None:

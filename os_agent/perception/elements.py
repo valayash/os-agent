@@ -28,7 +28,7 @@ ROLE_MAP: dict[str, str] = {
     "AXPopUpButton": "dropdown",
     "AXMenuButton": "menubutton",
     "AXMenuItem": "menuitem",
-    "AXMenuBarItem": "menuitem",
+    "AXMenuBarItem": "menu",
     "AXCheckBox": "checkbox",
     "AXRadioButton": "radio",
     "AXTextField": "textfield",
@@ -51,7 +51,7 @@ ROLE_MAP: dict[str, str] = {
 # Roles worth a number even with no accessible name — they are actionable.
 ALWAYS_INTERACTIVE = {
     "button", "dropdown", "menubutton", "menuitem", "checkbox", "radio",
-    "textfield", "textarea", "searchfield", "combobox", "link", "tab",
+    "textfield", "textarea", "searchfield", "combobox", "link", "tab", "menu",
     "slider", "stepper", "disclosure", "colorwell",
 }
 
