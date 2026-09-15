@@ -457,7 +457,7 @@ capture:    CGDisplayCreateImage (in-process, no subprocess, no disk)
             MEASURED A1: 55 ms warm / 189 ms cold, 1440x900 PNG, ~91 KB
             stages: CGDisplayCreateImage 18 · frombuffer 6 · reduce(2) 11 · PNG 13
             — A0 uses the `screencapture` CLI instead: a known-good permission canary
-ocr:        VNRecognizeTextRequest (Apple Vision)
+ocr:        DEFERRED — raises. See "OCR is DEFERRED" below.
 input:      pyautogui, FAILSAFE on
 ```
 
@@ -487,7 +487,25 @@ its own debugging, and each needs **its own task suite and its own baseline** �
 Finder do not exist on Windows.
 
 **Known weakness (all platforms):** Electron, canvas and some Java apps expose almost
-nothing. Fall back to `ocr()` when `len(elements) < 3` on a non-empty screen.
+nothing — confirmed at A0, where Claude Desktop returned 8 nodes, all `AXGroup`/`AXWindow`,
+with nothing actionable.
+
+**OCR is DEFERRED, not planned (decided at A2).** It would be redundant twice over: the
+planner is a vision model that can already read the screen and fall back to `Action.coords`,
+and on native apps the AX tree *is* the text oracle — A1 read TextEdit's whole document out
+of `AXValue` instantly. The suite is TextEdit / Finder / Preview / System Settings, all
+native AppKit, so the AX-blind case may never arise.
+
+What we build instead is the **trigger**, not the remedy: `perception/elements.py` logs
+`perception.sparse` when `len(elements) < 3` on a non-empty screen, and the rate lands in
+`RunResult`. If it stays zero across the 15 tasks, OCR was never needed. If it fires, we
+build `ocr()` against the real failing app rather than an imagined one.
+
+`DesktopAdapter.ocr()` stays on the protocol and keeps raising — the seam costs nothing.
+
+**Watch LibreOffice.** It draws through its own VCL toolkit rather than AppKit and has the
+weakest accessibility support of anything in the suite. If `perception.sparse` ever fires,
+that is the likely source.
 
 ### 8.3 `perception/elements.py` — platform-neutral
 
@@ -557,7 +575,7 @@ The planner emitted `expect`. Verification is checking it — a string match, no
 |---|---|---|
 | Pixel diff ratio | ~5 ms | Did anything change at all? |
 | Tree diff | ~20 ms | Did the expected element appear/disappear? |
-| Targeted OCR on bbox | ~100 ms | Does the field contain what we typed? |
+| `AXValue` of the target element | ~20 ms | Does the field contain what we typed? |
 
 Resolution: expectation satisfied → `success` · nothing changed at all → `no_change` ·
 error dialog or executor exception → `error` · check undecidable → `ambiguous`.
@@ -725,7 +743,8 @@ minimal `desktop/macos.py`, `env/desktop_env.py`.
 checker confirms the file — through the `Environment` interface, with policy enforced.
 
 ### A2 — Perception
-`desktop/macos.py` tree walk, `perception/elements.py`, `perception/som.py`, adapter `ocr()`.
+`desktop/macos.py` tree walk, `perception/elements.py`, `perception/som.py`.
+No OCR — deferred, see §8.2.
 **Gate:** annotated screenshots correct across 10 apps, verified by eye. Points/pixels
 unit test green.
 
