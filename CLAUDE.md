@@ -1254,6 +1254,13 @@ One observation captured and FROZEN, both modes run against it so focus could no
 **8.7× faster, 4× fewer prompt tokens, identical accuracy.** The image cost 4.8 seconds
 and contributed nothing.
 
+**CAVEAT, measured later the same day: that 8.7× was mostly the wallpaper, not the image.**
+Re-run with the window maximised (85 KB capture instead of 2,390 KB), the image call fell
+from 5,443 ms to **1,344 ms** — 4× faster — and the text-only advantage shrank from 8.7× to
+**2.4×**. The picture was never expensive because it is a picture; it was expensive because
+we were uploading a photograph of a forest. Fix the frame and the image becomes affordable,
+which matters because the image is what rescues a thin accessibility tree.
+
 Why it contributed nothing is the important part: element 13 is named
 `'alpha\nbeta\ngamma'`. The text list alone is unambiguous, so the picture had no
 information to add. **This is the BEST case, not the general case** — TextEdit has an
@@ -1353,6 +1360,19 @@ Measured on a real screen, same information both ways:
 | **our text list** | **6.2** |
 | synthesised SVG | 26.8 (**4.3×**) |
 | the image | ~1,730 total |
+
+**Measured three ways on one frozen observation** (TextEdit maximised, 14 elements,
+`groq/qwen3.8-27b`, n=3):
+
+| mode | latency | prompt tokens | correct |
+|---|---|---|---|
+| image + text | 1,344 ms | 2,370 | 2/3 (one rate-limit error, not a wrong answer) |
+| **SVG only** | **721 ms** | 1,141 | 3/3 |
+| **text only** | **562 ms** | **576** | 3/3 |
+
+**SVG does beat the image — 1.9× faster, half the tokens.** It genuinely skips the vision
+encoder. But it is dominated by text-only, 1.3× faster again at half the tokens again,
+because SVG buys geometry the model does not use.
 
 SVG lands between the two — cheaper than a picture, 4.3× more expensive than what we
 already send. XML spends most of its tokens on syntax, but the deeper reason is that
