@@ -15,7 +15,7 @@ unrunnable. Containing it here is what keeps that experiment possible.
 
 from langgraph.graph import END, StateGraph
 
-from os_agent.agent.nodes import Planner, Verifier, make_nodes
+from os_agent.agent.nodes import Planner, Reflector, Verifier, make_nodes
 from os_agent.agent.state import (
     MAX_CONSECUTIVE_FAILURES,
     MAX_REFLECTIONS,
@@ -74,6 +74,7 @@ def build_graph(
     env: Environment,
     planner: Planner,
     verifier: Verifier,
+    reflector: Reflector = None,
     *,
     checkpointer=None,
     approval: bool | None = None,
@@ -83,7 +84,7 @@ def build_graph(
     `planner` and `verifier` are injected so this exact graph runs with stubs
     at A3 and with a real model at A4 — the gate tests the production object.
     """
-    nodes = make_nodes(env, planner, verifier)
+    nodes = make_nodes(env, planner, verifier, reflector)
     g = StateGraph(AgentState)
     for name, fn in nodes.items():
         g.add_node(name, fn)

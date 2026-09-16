@@ -35,6 +35,7 @@ LOOP_REPEATS = 3  # same (screen, action) this many times -> forced reflect
 FACTS_CAP = 10  # enters the prompt, so this one is FIXED-size
 MAX_CONSECUTIVE_FAILURES = 2  # §11: never retry a failing action more than twice
 MAX_REFLECTIONS = 3  # reflect is an extra LLM call; it is not free
+REFLECTION_CAP = 240  # characters. It enters the prompt, so it is capped.
 
 
 class AgentState(TypedDict, total=False):
@@ -61,6 +62,10 @@ class AgentState(TypedDict, total=False):
 
     # -- compressed memory. ENTERS THE PROMPT, so hard-capped at 10. --------
     facts: list[str]
+    # ONE slot, overwritten each time — a strategy correction, not a history.
+    # Facts are durable truths about the world; this is transient advice about
+    # approach. Both are fixed-size, so the prompt never grows (§4.2).
+    reflection_note: str
 
     # -- counters ----------------------------------------------------------
     step: int
@@ -103,6 +108,7 @@ def initial_state(goal: str, task_id: str = "freeform") -> AgentState:
         last_outcome="",
         last_reason="",
         facts=[],
+        reflection_note="",
         step=0,
         llm_calls=0,
         consecutive_failures=0,

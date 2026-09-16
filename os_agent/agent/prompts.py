@@ -49,6 +49,52 @@ the world ("the file is at ~/notes.txt", "Save As is cmd+shift+s here"). It is
 never a narration of what you just did ("clicked the File menu")."""
 
 
+REFLECT_SYSTEM = """You are debugging a stuck computer-use agent.
+
+It has repeated an action without progress, or failed twice in a row. You will see
+the goal, what it tried, what the verifier said, and what is currently on screen.
+
+Reply with ONE short instruction — two sentences at most — telling it what to do
+DIFFERENTLY. Be concrete and name elements by number where you can.
+
+Good:  "cmd+s is being swallowed. Open the File menu (element 2) and click Save."
+Good:  "Element 13 is a label, not the text area. Click element 15 instead."
+Bad:   "Try again."                      (it already did)
+Bad:   "Make sure the file is saved."    (that is the goal, not a method)
+
+You are NOT choosing the action. You are correcting the approach."""
+
+
+def build_reflect_user(state: AgentState) -> str:
+    """Fuller context than the planner gets — but still fixed-size.
+
+    Reflection is allowed a richer prompt because it is rare. It is NOT allowed
+    a history: that would reintroduce the growth §4.2 exists to prevent.
+    """
+    last = state.get("last_action")
+    tried = "nothing yet"
+    if last is not None:
+        tried = (f"{last.kind}"
+                 f"{f' element {last.element_id}' if last.element_id is not None else ''}"
+                 f"{f' {last.text!r}' if last.text else ''}"
+                 f"{f' {last.keys}' if last.keys else ''}")
+    return "\n".join([
+        f"GOAL: {state['goal']}",
+        f"APP:  {state.get('app') or 'unknown'}",
+        f"IT IS STUCK AFTER {state['step']} STEPS.",
+        f"consecutive failures: {state.get('consecutive_failures', 0)}"
+        f"   repeating itself: {bool(state.get('looping'))}",
+        f"LAST TRIED: {tried}",
+        f"VERIFIER SAID: {state.get('last_outcome')} — {state.get('last_reason') or ''}",
+        (f"PREVIOUS ADVICE (it did not work): {state['reflection_note']}"
+         if state.get("reflection_note") else ""),
+        "",
+        f"ON SCREEN NOW\n{format_elements(state.get('elements') or [], limit=60)}",
+        "",
+        "What should it do differently?",
+    ])
+
+
 # ---------------------------------------------------------------------------
 # VOLATILE. Rebuilt from state, every step.
 # ---------------------------------------------------------------------------
@@ -97,6 +143,10 @@ def build_user(state: AgentState) -> str:
                 f"That did not work{f' ({why})' if why else ''}. "
                 "Try a DIFFERENT approach — repeating it will not help."
             )
+
+    # A correction from reflect, if it has fired. One slot, not a history.
+    if state.get("reflection_note"):
+        parts.append(f"!! ADVICE AFTER GETTING STUCK: {state['reflection_note']}")
 
     facts = state.get("facts") or []
     if facts:

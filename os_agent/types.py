@@ -144,6 +144,22 @@ class Expectation(BaseModel):
     )
 
 
+class Reflection(BaseModel):
+    """What the reflect node asks for when the agent is stuck.
+
+    ONE field on purpose. Reflection corrects the approach; it does not choose
+    the action — that stays the planner's job, so the two never disagree about
+    who is driving.
+    """
+
+    advice: str = Field(
+        description=(
+            "One concrete instruction, two sentences at most, telling the agent what to "
+            "do DIFFERENTLY. Name elements by number. Never 'try again'."
+        )
+    )
+
+
 class PlannedAction(BaseModel):
     """The planner's entire output. One call per step produces all of this."""
 

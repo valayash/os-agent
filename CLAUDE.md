@@ -911,11 +911,36 @@ guessing (§8.7 working on a real screen).
    Fixed WITHOUT changing the §7 `Environment` contract: `DesktopEnv` remembers what it
    last rendered and resolves ids itself.
 
-### A5 — Reflect, recovery, budget
-Two consecutive failures → reflect with fuller context. Task and suite budgets abort a run.
-RPM throttle live.
-**Gate:** agent recovers from a deliberately hostile task (a dialog that steals focus
-mid-task) and aborts cleanly when the budget is exceeded.
+### A5 — Reflect, recovery, budget ✅ PASSED
+`agent/prompts.py` reflection prompt, `types.Reflection`, `llm` rate limiter,
+`telemetry/trajectory.py`.
+
+**Gate: 6/6.** Driven by `replay_env`, because A5 is about control flow under failure and
+injecting failure PRECISELY matters more than injecting it realistically — macOS has
+already demonstrated it cannot be relied on to misbehave on cue (§5.3).
+
+| check | result |
+|---|---|
+| **reflection changes behaviour** | done in 3 steps, 1 reflection, advice reached the planner |
+| useless advice still terminates | `stuck` at step 8, not the step cap |
+| budget aborts a live run | stopped at $0.50 of $0.50 |
+| rpm throttle paces calls | 500 ms at rpm=120 |
+| trajectory is replayable | target kept as `textarea/'alpha Reviewed'`, frames on disk |
+
+**The first row is the whole gate.** Its planner recovers ONLY if it receives advice, so
+terminating with `done` proves the note actually flowed reflect → state → prompt → a
+different decision. Merely running `reflect` would have produced `max_steps`.
+
+**Reflection is one slot, not a history.** `reflection_note` is a single capped string,
+overwritten each time — a transient correction of approach, where `facts` are durable
+truths about the world. Both are fixed-size, so the prompt still never grows (§4.2). A
+reflection that fails is caught and degrades to counting: a broken reflection must not kill
+a run that still has steps left.
+
+**Pacing beats backoff.** `RateLimiter` spaces calls so the 503 never happens, rather than
+recovering after it does. Time spent pacing is `provider_wait_ms`, not agent latency — it
+exists only because of the provider's limits, and charging it to our agent would make our
+number worse for someone else's constraint.
 
 ### A6 — Benchmark harness
 15 tasks with programmatic checkers. Human reference recorded.

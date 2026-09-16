@@ -19,6 +19,7 @@ from collections.abc import Awaitable, Callable
 import structlog
 
 from os_agent.agent.state import (
+    REFLECTION_CAP,
     AgentState,
     is_looping,
     push_fact,
@@ -46,9 +47,17 @@ Planner = Callable[[AgentState], Awaitable[LLMResult]]
 Verifier = Callable[
     [AgentState, Action, Expectation, "Observation"], Awaitable[tuple[str, str]]
 ]
+# reflector: state -> LLMResult whose .parsed is a Reflection. OPTIONAL — when
+# absent, reflect degrades to counting, which is what A3's stub graph wants.
+Reflector = Callable[[AgentState], Awaitable["LLMResult"]] | None
 
 
-def make_nodes(env: Environment, planner: Planner, verifier: Verifier) -> dict:
+def make_nodes(
+    env: Environment,
+    planner: Planner,
+    verifier: Verifier,
+    reflector: Reflector = None,
+) -> dict:
     async def observe(state: AgentState) -> AgentState:
         """Capture the screen — unless verify already did (§8.8).
 
@@ -166,14 +175,31 @@ def make_nodes(env: Environment, planner: Planner, verifier: Verifier) -> dict:
         """The escape hatch, not a step.
 
         Every time this fires, llm_calls/steps rises above 1.0 — so its RATE is
-        a metric, not just its existence. A5 gives it real content; here it
-        only counts and clears the failure streak so plan gets a fresh attempt.
+        a metric, not just its existence. Making it USEFUL is the point; making
+        it RARE is the design.
+
+        It produces one short strategy note, which overwrites the previous one.
+        Not a history: a single slot, capped, so the prompt still never grows.
         """
+        note = ""
+        cost = 0.0
+        if reflector is not None:
+            try:
+                result = await reflector(state)
+                note = str(result.parsed.advice)[:REFLECTION_CAP]
+                cost = result.cost_usd
+            except Exception as exc:  # noqa: BLE001
+                # A failed reflection must not kill a run that still has steps
+                # left. Degrade to counting and let the planner try again.
+                log.warning("reflect.failed", error=f"{type(exc).__name__}: {exc}"[:160])
+
         log.warning("reflect", step=state["step"], reflections=state["reflections"] + 1,
-                    last_outcome=state.get("last_outcome"))
+                    last_outcome=state.get("last_outcome"), advice=note[:80])
         return {
             "reflections": state["reflections"] + 1,
             "llm_calls": state["llm_calls"] + 1,  # it IS an extra call. Count it.
+            "cost_usd": state["cost_usd"] + cost,
+            "reflection_note": note or state.get("reflection_note", ""),
             "consecutive_failures": 0,
             "recent_hashes": [],  # give the retry a clean slate
             "looping": False,

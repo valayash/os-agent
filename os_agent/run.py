@@ -18,7 +18,7 @@ import structlog
 
 from os_agent.agent.graph import build_graph, terminal_reason
 from os_agent.agent.nodes import Planner, Verifier
-from os_agent.agent.prompts import SYSTEM, build_user
+from os_agent.agent.prompts import REFLECT_SYSTEM, SYSTEM, build_reflect_user, build_user
 from os_agent.agent.state import AgentState, initial_state
 from os_agent.config import settings
 from os_agent.desktop.macos import MacOSAdapter
@@ -26,7 +26,8 @@ from os_agent.env.desktop_env import DesktopEnv
 from os_agent.llm.litellm_client import LiteLLMClient
 from os_agent.telemetry.log import configure
 from os_agent.telemetry.tracer import CallRecord, Tracer
-from os_agent.types import Action, Expectation, Observation, PlannedAction
+from os_agent.telemetry.trajectory import StepRecord, TrajectoryWriter
+from os_agent.types import Action, Expectation, Observation, PlannedAction, Reflection
 from os_agent.verify.cheap import check
 
 log = structlog.get_logger(__name__)
@@ -72,6 +73,38 @@ def make_planner(client: LiteLLMClient, tracer: Tracer) -> Planner:
     return plan
 
 
+def make_reflector(client: LiteLLMClient, tracer: Tracer):
+    """The extra call, made only when stuck. Its RATE is the metric (§8.8).
+
+    It gets a richer prompt than the planner — but still no history. Fuller
+    context means more of the CURRENT situation, never an accumulating log.
+    """
+
+    async def reflect(state: AgentState):
+        t0 = time.perf_counter()
+        result = await asyncio.to_thread(
+            client.plan,
+            system=REFLECT_SYSTEM,
+            text=build_reflect_user(state),
+            image_png=base64.b64decode(state.get("screenshot_b64") or ""),
+            schema=Reflection,
+            extra=settings.planner_extra(),
+        )
+        tracer.record(CallRecord(
+            node="reflect", step=state["step"], model=result.model,
+            provider=result.provider, latency_ms=result.latency_ms,
+            provider_wait_ms=result.provider_wait_ms,
+            prompt_tokens=result.prompt_tokens,
+            completion_tokens=result.completion_tokens,
+            cost_usd=result.cost_usd, repairs=result.repairs,
+            attempts=result.raw.get("attempts", 1), ok=True,
+        ))
+        _ = t0
+        return result
+
+    return reflect
+
+
 def make_verifier() -> Verifier:
     """Zero model calls. This is what holds llm_calls/steps at 1.00 (§8.7)."""
 
@@ -112,7 +145,13 @@ async def run_task(goal: str, task_id: str, *, yolo: bool, max_steps: int | None
         approve=None if yolo else approve_at_terminal,
         approval_on=not yolo,
     )
-    app = build_graph(env, make_planner(client, tracer), make_verifier(), approval=False)
+    app = build_graph(
+        env,
+        make_planner(client, tracer),
+        make_verifier(),
+        make_reflector(client, tracer),
+        approval=False,
+    )
 
     state = initial_state(goal=goal, task_id=task_id)
     if task_id != "freeform":
@@ -143,6 +182,30 @@ async def run_task(goal: str, task_id: str, *, yolo: bool, max_steps: int | None
     print(f"  tokens          : {summary['prompt_tokens']}+{summary['completion_tokens']}")
     print(f"  cost            : ${summary['cost_usd']:.4f}")
     print(f"  schema repairs  : {summary['schema_repair_rate']:.2f}/call")
+    print(f"  reflections     : {final['reflections']}")
+
+    # Every run goes to disk (§4.6). Phase B trains on these.
+    traj = TrajectoryWriter(task_id, goal, client.model, client.provider)
+    for i, rec in enumerate(tracer.records):
+        traj.add(StepRecord(
+            step=i, app=final.get("app", ""), bundle_id=final.get("bundle_id", ""),
+            subgoal=final.get("subgoal", ""), reasoning=final.get("reasoning", ""),
+            action=None, action_target=None, expect=None,
+            outcome=final.get("last_outcome", ""), reason=final.get("last_reason", ""),
+            elements=len(final.get("elements") or []),
+            perception_ms=final.get("perception_ms", 0.0),
+            llm_latency_ms=rec.latency_ms, provider_wait_ms=rec.provider_wait_ms,
+            prompt_tokens=rec.prompt_tokens, completion_tokens=rec.completion_tokens,
+            cost_usd=rec.cost_usd, repairs=rec.repairs,
+            facts=list(final.get("facts") or []),
+            reflection_note=final.get("reflection_note", ""),
+        ))
+    path = traj.close({
+        "success": score == 1.0 if score is not None else None,
+        "terminal_reason": terminal_reason(final),
+        "steps": final["step"], "wall_clock_s": round(wall, 2), **summary,
+    })
+    print(f"  trajectory      : {path}")
     print("=" * 68)
     env.close()
     return final, score, summary

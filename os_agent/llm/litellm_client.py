@@ -15,6 +15,7 @@ import litellm
 import structlog
 from pydantic import BaseModel
 
+from os_agent.config import settings
 from os_agent.llm.base import LLMResult
 from os_agent.llm.schema import REPAIR_INSTRUCTION, SchemaFailure, parse_or_none
 from os_agent.telemetry.tracer import price
@@ -30,13 +31,46 @@ MAX_ATTEMPTS = 5
 BASE_BACKOFF_S = 1.0
 
 
+class RateLimiter:
+    """Minimum interval between calls (CLAUDE.md §8.1, LLM_RPM).
+
+    Pacing is cheaper than backoff. A4 measured the free tier returning 503 on
+    most calls when hammered; spacing requests out avoids the rejection instead
+    of recovering from it.
+
+    Time spent pacing counts as PROVIDER WAIT, not agent latency. It exists
+    only because of the provider's limits, so attributing it to our agent would
+    make our own number worse for someone else's constraint (§5).
+    """
+
+    def __init__(self, rpm: int) -> None:
+        self.min_interval = 60.0 / rpm if rpm > 0 else 0.0
+        self._last = 0.0
+
+    def wait(self) -> float:
+        """Blocks if needed. Returns the milliseconds spent waiting."""
+        if self.min_interval <= 0:
+            return 0.0
+        elapsed = time.monotonic() - self._last
+        sleep_for = self.min_interval - elapsed
+        if sleep_for > 0:
+            time.sleep(sleep_for)
+            self._last = time.monotonic()
+            return sleep_for * 1000
+        self._last = time.monotonic()
+        return 0.0
+
+
 class LiteLLMClient:
     """Implements the LLMClient protocol (CLAUDE.md §7)."""
 
-    def __init__(self, model: str, *, max_attempts: int = MAX_ATTEMPTS) -> None:
+    def __init__(
+        self, model: str, *, max_attempts: int = MAX_ATTEMPTS, rpm: int | None = None
+    ) -> None:
         self.model = model
         self.provider = model.split("/", 1)[0] if "/" in model else "unknown"
         self.max_attempts = max_attempts
+        self.limiter = RateLimiter(settings.llm_rpm if rpm is None else rpm)
 
     def plan(
         self,
@@ -97,7 +131,7 @@ class LiteLLMClient:
 
     def _send(self, messages, schema, extra) -> tuple[str, tuple[int, int], float, float, int]:
         """Returns (raw, (prompt, completion), agent_ms, provider_wait_ms, attempts)."""
-        wait_ms = 0.0
+        wait_ms = self.limiter.wait()  # pacing is the provider's time, not ours
         last: Exception | None = None
 
         for attempt in range(1, self.max_attempts + 1):
