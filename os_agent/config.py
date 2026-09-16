@@ -94,11 +94,22 @@ class Settings:
         return Path(_env("SANDBOX_DIR", "~/os-agent-sandbox")).expanduser()
 
     def planner_extra(self) -> dict:
-        """Provider-specific knobs. Passed through LLMClient, never abstracted."""
+        """Provider-specific knobs. Passed through LLMClient, never abstracted.
+
+        MEASURED A4: Gemini rejects the friendly value. `media_resolution` wants
+        the protobuf enum spelling — "MEDIA_RESOLUTION_MEDIUM", not "medium":
+
+            400 Invalid value at 'generation_config.media_resolution' "medium"
+
+        We keep the friendly words in .env because the file is read by humans,
+        and translate here. The knob NAME was right; only the spelling was not,
+        which is a good argument for sending one real request before building
+        five files on top of an assumption.
+        """
         if self.planner.startswith("gemini/"):
             return {
                 "thinking_level": self.thinking_level,
-                "media_resolution": self.media_resolution,
+                "media_resolution": f"MEDIA_RESOLUTION_{self.media_resolution.upper()}",
             }
         if self.planner.startswith("anthropic/"):
             return {"effort": self.thinking_level}

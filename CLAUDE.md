@@ -989,17 +989,57 @@ Put that date in a comment next to the table.
 
 **Free tier is for iteration, not for results.** Run A6 and A7 on a paid key (§11).
 
-### Cost reference, measured against our step shape
+### MEASURED A4 — real calls, Gemini 3.8 Flash, free tier
 
-~3,300 prompt tokens (of which the screenshot is ~1,730) + ~300 completion, per step:
+Five successful calls with a real screenshot (11 elements) and the real
+`PlannedAction` schema:
 
-| Config | $/step | $/task (15 steps) | $/suite (15 tasks) |
-|---|---|---|---|
-| Gemini 3.8 Flash, thinking `low` | ~$0.0036 | ~$0.054 | **~$0.81** |
-| Gemini 3.8 Flash, thinking `high` | ~$0.011 | ~$0.17 | ~$2.50 |
-| Gemini 3.1 Pro Preview | ~$0.010 | ~$0.15 | ~$2.20 |
+| | Estimated | **Measured** |
+|---|---|---|
+| plan call latency | 1,500 ms | **4,365 ms median** (min 3,998 · max 7,378) |
+| prompt tokens | ~3,300 | **628** |
+| completion tokens | ~300 | 112–222 |
+| cost per step | $0.0036 | **~$0.0011** |
 
-A suite run under a dollar is why A7's 3-repeat variance pass is affordable.
+The latency estimate was **3× low on the largest item in the step budget**.
+Token and cost estimates were high, because element counts on real screens are
+often small and `MEDIA_RESOLUTION_MEDIUM` compresses the image hard.
+
+**Revised step budget, now entirely measured:**
+
+    look at screen     77 ms
+    ask the AI      4,365 ms   <- 87% of a step
+    do it + settle    500 ms
+    check              25 ms
+    ------------------------
+    one step        ~5.0 s     15-step task ~75 s
+
+**`thinking_level` is a 2.6× latency lever — measured, not assumed:**
+
+| setting | latency | completion tokens |
+|---|---|---|
+| `low` | 4,365 ms | 112–222 |
+| `high` | 11,475 ms | 220 |
+
+`low` stays the default. `high` is an ablation row, not a setting to reach for.
+
+### The free tier is not a measurement surface — proven
+
+Across 5 successful calls the free tier added **111,520 ms of queueing** (~22 s
+per call), needed 15 attempts to land 5 calls, and failed one call outright
+after 5 retries with exponential backoff.
+
+    what wall-clock would report   ~26 s/step   <- mostly Google's queue
+    what is actually ours            4.4 s/step
+
+**Reporting wall-clock would have overstated our latency by 6×** and said
+nothing about the agent. The §5 decision to split `provider_wait_s` out of
+`agent_latency_s` — made before any code existed — paid for itself here more
+than any optimization could.
+
+Retry with exponential backoff is therefore **mandatory, not defensive**: 503s
+are the common case on the free tier, and every millisecond of backoff belongs
+in `provider_wait_ms` (§8.1).
 
 ---
 

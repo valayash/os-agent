@@ -19,6 +19,8 @@ dependencies = [
     # subject of the experiment, not a foundation).
     "langgraph>=0.2",
     "langgraph-checkpoint-sqlite>=2.0",
+    # A4 — the model seam. One call signature over ~100 providers (CLAUDE.md §8.1).
+    "litellm>=1.50",
 ]
 
 [project.optional-dependencies]
