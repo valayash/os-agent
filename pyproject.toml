@@ -15,6 +15,10 @@ dependencies = [
     "pydantic>=2.7",
     "python-dotenv>=1.0",
     "structlog>=24.1",
+    # A3 — the graph. Confined to os_agent/agent/ (CLAUDE.md §13: LangGraph is a
+    # subject of the experiment, not a foundation).
+    "langgraph>=0.2",
+    "langgraph-checkpoint-sqlite>=2.0",
 ]
 
 [project.optional-dependencies]

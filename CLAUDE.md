@@ -849,11 +849,31 @@ Fewer than the 10 originally specified: three macOS windowing features (§5.3) b
 access to the rest, and the six obtained already cover every layout family the suite will
 touch. Recorded as a deviation rather than quietly restated as ten.
 
-### A3 — Graph skeleton
-LangGraph with **stub nodes that only print**, driven by `replay_env`. Verify routing,
-cycles, termination, step cap, loop detection — before any model call and without touching
-the real machine.
-**Gate:** 50 stub steps, correct termination on every exit path.
+### A3 — Graph skeleton ✅ PASSED
+LangGraph with stub nodes, driven by `replay_env`. No model, no machine, no permissions.
+**Gate: 7/7 exit paths correct; 44 tests pass.**
+
+| Scenario | steps | calls/step | terminal reason |
+|---|---|---|---|
+| model says done | 4 | **1.00** | `done` |
+| step cap | **50** | **1.00** | `max_steps` |
+| model says fail | 2 | 1.00 | `agent_fail` |
+| repeated failure | 8 | 1.50 | `stuck` (4 reflections) |
+| oscillation, everything "succeeded" | 20 | 1.20 | `stuck` (loop detector alone) |
+| policy refusal | 0 | — | `policy` |
+| budget exceeded | 3 | 1.00 | `budget` |
+
+**`llm_calls / steps` is exactly 1.00 on every healthy path, and rises only when recovery
+fires.** §1's target is now a structural property rather than an aspiration, and when it
+drifts at A4 the cause is already visible in this number.
+
+Also verified: `interrupt_before=["execute"]` pauses with the environment untouched and
+resumes into execution; state survives across invocations via the checkpointer; and a
+50-step run ends with `facts` ≤ 10, `recent_hashes` ≤ 8 and no `messages`/`history` key
+anywhere (§4.2, §11).
+
+**`import langgraph` appears in exactly one file, `agent/graph.py`** — asserted by a grep in
+the gate. §13's "LangGraph vs custom runtime" ablation stays runnable only while that holds.
 
 ### A4 — Real nodes
 Wire `llm/litellm_client.py`. `plan` requests `PlannedAction` as a JSON schema.
