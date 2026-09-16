@@ -9,7 +9,10 @@ import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
+import structlog
 from dotenv import load_dotenv
+
+_log = structlog.get_logger(__name__)
 
 load_dotenv()
 
@@ -32,6 +35,25 @@ COST_TABLE: dict[str, tuple[float, float]] = {
     "anthropic/claude-opus-5": (5.00, 25.00),
     "anthropic/claude-sonnet-5": (2.00, 10.00),
     "anthropic/claude-haiku-4-5": (1.00, 5.00),
+    # --- Groq. ESTIMATED, not verified against the published table. ---------
+    "groq/qwen/qwen3.8-27b": (0.30, 0.60),
+    "groq/openai/gpt-oss-120b": (0.15, 0.60),
+    "groq/openai/gpt-oss-20b": (0.10, 0.40),
+}
+
+# Prices we have NOT confirmed against the provider's own published table.
+#
+# The alternative to this set was worse in both directions: raising on an
+# unknown model blocks experimentation, and silently inventing a number gets it
+# quoted in a results table six weeks later as though it were measured. So the
+# number works for budget enforcement, and every use is flagged.
+#
+# NOTHING IN THIS SET MAY APPEAR IN THE README (§2). Verify at
+# console.groq.com/settings/billing/plans first, then delete the entry here.
+UNVERIFIED_PRICING: set[str] = {
+    "groq/qwen/qwen3.8-27b",
+    "groq/openai/gpt-oss-120b",
+    "groq/openai/gpt-oss-20b",
 }
 
 
@@ -41,6 +63,11 @@ class UnknownModelCost(KeyError):
 
 def cost_usd(model: str, prompt_tokens: int, completion_tokens: int) -> float:
     """Price one call. Unknown models raise — silence would corrupt the budget."""
+    if model in UNVERIFIED_PRICING:
+        _log.warning(
+            "cost.unverified", model=model,
+            note="estimated price; verify before any published figure",
+        )
     try:
         cin, cout = COST_TABLE[model]
     except KeyError as exc:

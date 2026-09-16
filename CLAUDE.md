@@ -1110,6 +1110,37 @@ per call** at 1,103–1,155 prompt tokens.
 `media_resolution` from a minor Phase B row to a primary lever. Benchmark with a real
 screen or do not benchmark.
 
+### MEASURED A5 — Groq / Qwen is a live option, and the A6 ablation gets a row
+
+`qwen/qwen3.8-27b` on Groq does BOTH things this design needs — vision and strict JSON
+schema — which most open-weight options do not. Open-weight sibling of the family
+currently topping OSWorld (§17.5).
+
+Same real screen, same prompt, both through our own client:
+
+| model | agent latency | provider wait | prompt+completion |
+|---|---|---|---|
+| `groq/qwen/qwen3.8-27b` | **2,591 ms** | 22,452 ms (free-tier backoff) | 2,315+171 |
+| `gemini/gemini-3.1-flash-lite` | 3,288 ms | 0 ms | 1,042+90 |
+
+**No clear winner, which is the correct answer at this stage.** Groq is ~21% faster per
+call, but spends **2.2× the prompt tokens on the identical image** — different image
+tokenization, and it offsets the speed. Its free tier also rate-limits hard: 22.5 s of
+backoff across four retries to land three calls.
+
+Accuracy is unmeasured, so this is an A6 ablation row and nothing more. Provider swap
+remains one env var (§4.9), which is what makes the row cheap to run at all.
+
+### Unverified pricing is a flagged state, not a silent guess
+
+`config.UNVERIFIED_PRICING` holds models whose price we have NOT confirmed against the
+provider's published table. Both alternatives were worse: raising on an unknown model
+blocks experimentation, and inventing a number silently gets it quoted in a results table
+six weeks later as though it were measured.
+
+So the number works for budget enforcement, every use logs `cost.unverified`, and
+**nothing in that set may appear in the README** (§2). Verify, then delete the entry.
+
 ### The free tier is not a measurement surface — proven
 
 Across 5 successful calls the free tier added **111,520 ms of queueing** (~22 s
