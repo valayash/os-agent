@@ -1079,6 +1079,43 @@ The failures section is not optional — it is the credibility.
 
 ---
 
+## 17.5 Field state — checked 2026-09-17
+
+**The accuracy problem is solved. This changes what "match published accuracy" costs.**
+
+OSWorld-Verified leaderboard, September 2026:
+
+| System | Success |
+|---|---|
+| Qwen3.8 Max | **86.1%** |
+| Claude Fable 5 | 85% |
+| Pointer + Claude Opus 4.7 | 83.6% |
+| **Human baseline** | **72.4%** |
+
+Five verified submissions now sit ABOVE the human baseline; scores rose ~5-7x between 2023
+and early 2026. An earlier note in this file assumed the field sat at 40-60%. It does not,
+and planning against that number would have been planning against 2024.
+
+**What it means for this project:**
+
+1. **The thesis is more right, not less.** With accuracy commoditized, latency and cost are
+   the remaining axes. Current research still names 2-5 s per action and *"performance
+   degrades as conversation history grows"* as open problems — the second is the exact
+   thing §4.2 is built to avoid.
+2. **The bar for "reproduce a published baseline" (§9 A8, §2) is now ~85%, not ~40%.**
+   That is a frontier-model-plus-good-harness target, not a weekend's work. Any claim of
+   the form "as accurate as the field" has to clear 85% or not be made.
+3. **A 15-task local suite is a learning artifact, not a competitive claim.** It measures
+   OUR agent against OUR baseline honestly, which is the stated goal (§2). It does not and
+   cannot say anything about the field.
+4. Startups are competing on exactly this axis (Pointer, 83.6%). The market raised ~$4.7B
+   across 59 agentic-AI deals Jul 2025–Jun 2026, but the top 10 deals took 73% of it.
+
+**Do not let this drift.** These numbers move monthly. Re-check before quoting them, and
+date any figure that goes in the README.
+
+---
+
 ## 17. Deferred: OSWorld
 
 Not abandoned — descoped. It was never the thesis; it was the anchor that would let the
