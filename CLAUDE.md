@@ -1183,6 +1183,45 @@ Listed so Phase A decisions stay compatible. Each becomes one ablation row.
 | Model swap (Flash / Flash-Lite / Pro, and across providers) | Free — one env var |
 | **LangGraph vs custom runtime** | Quantify framework overhead — a resume line in itself |
 
+### MEASURED — text-only may be the single largest lever, and it is half-tested
+
+Same screen, same prompt, image omitted entirely:
+
+| model | mode | latency | prompt tokens |
+|---|---|---|---|
+| `gemini-3.1-flash-lite` | text + image | 4,953 ms | 1,046 |
+| `gemini-3.1-flash-lite` | **text only** | **2,710 ms** | **524** |
+| `groq/qwen/qwen3.8-27b` | text + image | ~2,591 ms | 2,315 |
+| `groq/qwen/qwen3.8-27b` | **text only** | **515 ms** | 525 |
+
+**1.8× faster on Gemini, ~5× on Groq, and half the prompt tokens on both.** Larger than
+every other lever on this list.
+
+**The image costs far more than its token count implies, and BYTES are part of why.**
+Measured on two screens: a 246 KB capture gave a 3.3 s call, a 2,391 KB capture of a
+TextEdit document gave 16.4 s. Ten times the bytes, five times the latency — that is upload
+time, not tokenization. PNG size varies ~10× with screen content, so image latency is
+*variable in a way token counts do not show*. `compress_level=1` (chosen at A1 for speed)
+is part of that; JPEG was measured at A1 as 2.3 ms to encode against PNG's 13 ms and
+similar size, and was passed over for text fidelity. That trade needs re-examining.
+
+**ACCURACY IS UNMEASURED.** The grounding half of this experiment was invalid — TextEdit
+lost focus mid-run (§5.3 again), so the captures were of a different app and every "did it
+pick the right element" result is meaningless. We know text-only is much faster. We do not
+know whether it still clicks the right thing, which is the question that decides whether it
+is usable at all.
+
+**Redo at A6 against the frozen suite**, per app, because the answer almost certainly
+differs by toolkit: WhatsApp's tree names every row unambiguously (25 clean elements),
+while Safari boxes label text rather than tiles and Electron apps expose almost nothing
+(§8.4). The likely outcome is not "text-only wins" but **"text-only wins where the tree is
+good"** — which would make it an adaptive choice per observation rather than a global
+setting.
+
+A plumbing note, because the lever was unreachable without it: `LiteLLMClient._content`
+always built an image block, so an empty image was sent as an empty data URI and rejected
+with a 400. Text-only mode was impossible to even try because of four lines of plumbing.
+
 ### Why keyboard-first is a step-count lever, not an execution-speed one
 
 Execution is ~500 ms of a ~4,600 ms step. Making the action instant saves 12%, and typing

@@ -121,8 +121,16 @@ class LiteLLMClient:
 
     # ----------------------------------------------------------------------
     @staticmethod
-    def _content(text: str, image_png: bytes) -> list[dict]:
-        """LiteLLM normalises this shape to each provider's own encoding."""
+    def _content(text: str, image_png: bytes) -> list[dict] | str:
+        """LiteLLM normalises this shape to each provider's own encoding.
+
+        NO IMAGE MEANS NO IMAGE BLOCK. Sending an empty data URI is a 400, and
+        it made text-only mode impossible to even try — the Phase B lever was
+        unreachable because of four lines of plumbing. Grounding from the
+        element list alone is a legitimate mode (§8.4), not an error case.
+        """
+        if not image_png:
+            return text
         b64 = base64.b64encode(image_png).decode()
         return [
             {"type": "text", "text": text},
