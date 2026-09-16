@@ -1173,6 +1173,8 @@ Listed so Phase A decisions stay compatible. Each becomes one ablation row.
 | Adaptive settle wait (poll-until-quiet vs blind sleep) | ~1 s/step, zero accuracy cost |
 | Pipeline overlap + prompt caching | 30–50% latency, zero accuracy cost |
 | Action grouping | 3–5× fewer LLM calls |
+| **Keyboard-first prompting** | **Fewer STEPS, therefore fewer calls — see below** |
+| **Hedged requests across providers** | Latency becomes min(A,B) instead of whichever you picked. Costs 2× money for 1× latency |
 | Model cascading + calibration | Large cost reduction; needs a calibration curve |
 | Speculative execution | Fewer calls; cut it if misprediction rate is too high |
 | Trajectory RAG | Retrieve similar past runs as few-shot context |
@@ -1180,6 +1182,42 @@ Listed so Phase A decisions stay compatible. Each becomes one ablation row.
 | Trajectory cache | Order-of-magnitude on repeat tasks |
 | Model swap (Flash / Flash-Lite / Pro, and across providers) | Free — one env var |
 | **LangGraph vs custom runtime** | Quantify framework overhead — a resume line in itself |
+
+### Why keyboard-first is a step-count lever, not an execution-speed one
+
+Execution is ~500 ms of a ~4,600 ms step. Making the action instant saves 12%, and typing
+is actually SLOWER per action than clicking (13.9 ms/char measured vs ~50 ms for a click).
+As an execution optimisation it is nearly worthless.
+
+**The win is that every step is one model call, so halving the steps halves the model time.**
+
+    mouse:     click "File" -> 1 call     click "Save" -> 1 call     = ~8 s
+    keyboard:  cmd+s        -> 1 call                                = ~4 s
+
+Menus are the worst case: they are inherently two-step, because the menu's contents only
+appear in the NEXT observation.
+
+**The A4 run already shows the waste.** Of 5 steps, two were avoidable — step 0 clicked a
+text area that already had focus, and step 2 opened the File menu before using `cmd+s`
+anyway. A keyboard-first agent does that task in 3 steps: **40% less latency and cost, same
+outcome.**
+
+Implementation is a prompt change plus a per-app shortcut table (which is what the "app
+knowledge" row above really buys). The guardrail cost is real though: `cmd+q`, `cmd+w` and
+`cmd+delete` are all one keystroke from destructive, so `IRREVERSIBLE` and
+`DANGEROUS_CHORDS` (§8.6) have to grow alongside it.
+
+### Why there is nothing to do while waiting for the model
+
+The model call is ~87% of a step and the machine is idle throughout. That idleness is a
+**dependency, not an inefficiency**: step N+1 cannot be planned until the result of step N
+is visible. The screen is unchanged during the call, so re-capturing returns the same
+image, and `expect` — the thing verification needs — comes FROM the call being waited on.
+
+So the dead time cannot be filled. It can only be attacked three ways: fewer calls
+(keyboard-first, action grouping), faster calls (model, `media_resolution`,
+`thinking_level`), or breaking the dependency (speculation, hedging). Everything in the
+table above is one of those three.
 
 ---
 
