@@ -1219,6 +1219,71 @@ Listed so Phase A decisions stay compatible. Each becomes one ablation row.
 | Trajectory cache | Order-of-magnitude on repeat tasks |
 | Model swap (Flash / Flash-Lite / Pro, and across providers) | Free — one env var |
 | **LangGraph vs custom runtime** | Quantify framework overhead — a resume line in itself |
+| Confidence-gated approval | `PlannedAction.confidence` exists and is unused — ask a human only when low |
+| Constrained element ids | Enumerate valid ids in the schema so an invalid pick is impossible |
+| Upfront plan / checklist | ONE extra call amortised over N steps; may be net negative |
+| **Fine-tuning / distillation** | **Phase C at the earliest — see the trap below** |
+
+### Agentic-AI patterns: the filter is whether they ADD calls
+
+Most published agent techniques add model calls. §1 says calls-per-step is the number that
+decides this project. So the filter is simple and it rejects most of the literature:
+
+**Rejected — these add calls, which is the thing we exist to remove:**
+
+| Pattern | Why not |
+|---|---|
+| Multi-agent specialists (planner + grounder + critic) | 3–4× the calls. This is *precisely* what makes published CUAs slow. |
+| Self-consistency / majority voting | 3× the calls for a marginal accuracy gain we are not competing on |
+| Evaluator–optimizer loops | generate N candidates, score them: N× the calls |
+| Deep chain-of-thought | MEASURED: `thinking_level` high costs 2.6× latency (§12) |
+| LLM-as-judge verification | the second call `expect` was designed to avoid (§4.5) |
+
+**Worth having — these reduce or reuse calls:**
+
+| Pattern | How it fits |
+|---|---|
+| ReAct (reason + act interleaved) | already the loop |
+| Budgeted reflection | already built (A5) — useful *and* rare |
+| Bounded working memory | already built — `facts`, capped at 10 |
+| Semantic / trajectory caching | reuse a past answer for a seen (screen, goal) — order of magnitude on repeats |
+| Confidence gating | one field already emitted, currently unused. Ask a human, or verify harder, only when low |
+| Constrained decoding | valid element ids in the schema: an impossible action becomes unrepresentable rather than caught |
+
+The asymmetry is the point: **we adopt the patterns that make one call do more, and reject
+the ones that make more calls do one thing.**
+
+### Fine-tuning — the prize, and the trap
+
+**The prize is distillation, not accuracy.** Schema adherence is already solved
+(`schema_repair_rate` 0.00) and accuracy is not our axis. The win would be training a SMALL
+fast model to imitate a large one on this narrow distribution: driving a desktop needs one
+skill done quickly, not general intelligence. A 3B model matching a 27B here would mean
+sub-200 ms steps. §4.6 records every run to disk from the first commit precisely so that
+training data accumulates instead of being thrown away.
+
+**The trap is training on the test set, and it would look like success.**
+
+- The 15 benchmark tasks must never appear in training data
+- Nor near-duplicates — "add a line to a TextEdit document" and "append text in TextEdit"
+  are the same task wearing a hat
+- Even a clean split leaves a soft version: tuning on "macOS desktop tasks" moves the model
+  toward the benchmark's domain
+
+Solvable by holding the suite out and training on a separate distribution, but it must be
+designed in, never patched on.
+
+**And the ordering matters more than the technique:**
+
+    1. prompting        free, minutes to iterate    <- keyboard-first, text-only
+    2. MEASURE          A6, the baseline
+    3. few-shot from recorded runs                  <- most of the benefit, no training
+    4. fine-tune        only if 1-3 have plateaued
+
+Step 3 deserves the emphasis: retrieving good past trajectories as examples gets much of
+what fine-tuning gets, reversibly, from dozens of examples rather than thousands.
+
+Fine-tuning a VLM wants **thousands** of trajectories. We have about five. Phase C.
 
 ### MEASURED — text-only may be the single largest lever, and it is half-tested
 
