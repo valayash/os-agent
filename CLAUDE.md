@@ -1302,12 +1302,41 @@ was reasonable then and is now a guess sitting on the second-largest cost in a s
 needs the same controlled treatment the text-only question got: frozen observation, both
 encodings, does it still pick the right element.
 
-**Hypothesis worth testing: the desktop wallpaper is most of the bytes.** We capture the
-FULL screen, and a photographic wallpaper is the worst case for PNG and the best case for
-JPEG. A TextEdit capture measured 2,390 KB — absurd for a mostly-white text document, and
-consistent with a forest photograph dominating the frame. Cropping to the active window
-would remove it entirely, and `scripts/a2_windows.py` already does per-window capture. A
-direct test was inconclusive because the window happened to fill the screen.
+### CONFIRMED — the desktop wallpaper was ~97% of every screenshot
+
+Same TextEdit document, same content, only the window size changed:
+
+| window geometry | capture |
+|---|---|
+| 646×418 (default, wallpaper visible) | **2,393 KB** |
+| 700×500 | 2,229 KB |
+| **1440×875 (maximised)** | **86 KB** |
+
+**28× smaller.** We were losslessly encoding a photographic wallpaper on every step so the
+model could look at a text document. That dwarfs the 1.8× available from JPEG, and it is
+free.
+
+**Window geometry IS settable through the accessibility API.** `AXPosition` and `AXSize`
+accept `Quartz.CGPoint` / `CGSize` via `AXValueCreate`; both returned success on TextEdit.
+A first attempt returned `-25200` (illegal argument) because the value was constructed
+wrongly, not because macOS refused — worth recording, because that error looks like a
+permissions wall and is not one. Whether Electron apps permit it is still untested.
+
+**This belongs in `TaskSpec.setup()`, and the reason is benchmark hygiene, not bytes.**
+
+If the window is a different size on each run, every run sees a different screen: different
+element count, different positions, different SoM layout, possibly different scroll state.
+Run-to-run variance would then include *"how big was the window when I started"* — noise
+the agent cannot control, inside the exact measurement A7 exists to quantify. §8.11 says
+determinism comes from the sandbox rather than the OS; **window geometry is part of that
+sandbox and we had missed it.**
+
+So setup sets a known frame before the agent looks, exactly as it seeds the file. It is not
+in the action space.
+
+> **MAXIMISE, NEVER FULLSCREEN.** The green button gives the app its own Space and triggers
+> the §5.3 wall — the agent goes blind to everything else. Resize to fill the display
+> instead: same Space, same visibility, all of the benefit.
 
 ### Why keyboard-first is a step-count lever, not an execution-speed one
 
