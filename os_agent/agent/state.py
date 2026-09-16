@@ -46,7 +46,8 @@ class AgentState(TypedDict, total=False):
     app: str
     bundle_id: str
     elements: list[Element]
-    screenshot_b64: str
+    screenshot_b64: str  # ANNOTATED — what the planner sees
+    screenshot_plain_b64: str  # clean — evidence for the pixel diff
     obs_fresh: bool  # verify captured already; observe is then a no-op (§8.8)
     screen_hash: str  # fingerprint of the element set, for loop detection
 
@@ -56,6 +57,7 @@ class AgentState(TypedDict, total=False):
     last_action: Action | None
     last_expect: Expectation | None
     last_outcome: str  # success | no_change | error | ambiguous
+    last_reason: str  # the one-line why, e.g. "'Save' did not appear"
 
     # -- compressed memory. ENTERS THE PROMPT, so hard-capped at 10. --------
     facts: list[str]
@@ -91,6 +93,7 @@ def initial_state(goal: str, task_id: str = "freeform") -> AgentState:
         bundle_id="",
         elements=[],
         screenshot_b64="",
+        screenshot_plain_b64="",
         obs_fresh=False,
         screen_hash="",
         subgoal="",
@@ -98,6 +101,7 @@ def initial_state(goal: str, task_id: str = "freeform") -> AgentState:
         last_action=None,
         last_expect=None,
         last_outcome="",
+        last_reason="",
         facts=[],
         step=0,
         llm_calls=0,

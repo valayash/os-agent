@@ -48,8 +48,8 @@ def scripted_planner(script: list[PlannedAction], repeat_last: bool = True,
 
 
 def fixed_verifier(outcome: str):
-    async def verify(state, action, expect) -> str:
-        return outcome
+    async def verify(state, action, expect, after) -> tuple[str, str]:
+        return outcome, "stub"
     return verify
 
 
@@ -142,8 +142,8 @@ async def main() -> int:
     ))
 
     # 7. budget
-    async def spending_verifier(state, action, expect):
-        return "success"
+    async def spending_verifier(state, action, expect, after):
+        return "success", "stub"
 
     class SpendingEnv(ReplayEnv):
         async def observe(self):

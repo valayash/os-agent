@@ -26,9 +26,16 @@ ApproveFn = Callable[[Action, Verdict], bool]
 
 
 class Executor:
-    def __init__(self, adapter: DesktopAdapter, approve: ApproveFn | None = None) -> None:
+    def __init__(
+        self,
+        adapter: DesktopAdapter,
+        approve: ApproveFn | None = None,
+        *,
+        approval_on: bool = True,
+    ) -> None:
         self.adapter = adapter
         self.approve = approve
+        self.approval_on = approval_on
 
     def run(
         self,
@@ -47,6 +54,7 @@ class Executor:
                 mode=mode,
                 frontmost_bundle=bundle,
                 allowed_bundles=allowed_bundles,
+                approval_on=self.approval_on,
             )
             if not verdict.allowed:
                 log.warning("policy.refused", kind=action.kind, reason=verdict.reason)

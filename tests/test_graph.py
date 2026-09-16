@@ -29,8 +29,8 @@ def planner_of(action, cost=0.0):
 
 
 def verifier_of(outcome):
-    async def v(state, action, expect):
-        return outcome
+    async def v(state, action, expect, after):
+        return outcome, "stub"
     return v
 
 

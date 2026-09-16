@@ -12,6 +12,7 @@ in both cases, which means A3's gate tests the production graph rather than a
 parallel mock of it.
 """
 
+import base64
 import time
 from collections.abc import Awaitable, Callable
 
@@ -25,7 +26,7 @@ from os_agent.agent.state import (
 )
 from os_agent.env.base import ApprovalDenied, Environment, PolicyViolation
 from os_agent.llm.base import LLMResult
-from os_agent.types import Action, Expectation, PlannedAction
+from os_agent.types import Action, Expectation, Observation, PlannedAction
 
 log = structlog.get_logger(__name__)
 
@@ -36,8 +37,15 @@ log = structlog.get_logger(__name__)
 # mutate state (LangGraph merges what a node RETURNS and discards the rest).
 # Learned by writing a budget test that silently did nothing.
 Planner = Callable[[AgentState], Awaitable[LLMResult]]
-# verifier: (state, action, expect) -> outcome. NO LLM unless ambiguous (§8.7)
-Verifier = Callable[[AgentState, Action, Expectation], Awaitable[str]]
+# verifier: (state, action, expect, after) -> (outcome, reason). NO LLM (§8.7).
+#
+# It takes the AFTER observation because verification is a comparison: what the
+# screen looked like before (carried in state) against what it looks like now.
+# The first version of this called the verifier BEFORE taking the post-action
+# observation, which meant it could only ever see the stale screen.
+Verifier = Callable[
+    [AgentState, Action, Expectation, "Observation"], Awaitable[tuple[str, str]]
+]
 
 
 def make_nodes(env: Environment, planner: Planner, verifier: Verifier) -> dict:
@@ -58,7 +66,11 @@ def make_nodes(env: Environment, planner: Planner, verifier: Verifier) -> dict:
             "app": obs.meta.get("app", ""),
             "bundle_id": obs.meta.get("bundle_id", ""),
             "elements": obs.elements,
-            "screenshot_b64": "",  # A4 fills this; stubs do not need bytes
+            # The ANNOTATED image — the one with the numbered boxes. That is
+            # what the planner looks at; the clean screenshot is only evidence
+            # for the pixel diff in verify.
+            "screenshot_b64": base64.b64encode(obs.annotated).decode(),
+            "screenshot_plain_b64": base64.b64encode(obs.screenshot).decode(),
             "screen_hash": obs.meta.get("screen_hash", ""),
             "obs_fresh": False,
             "perception_ms": (time.perf_counter() - t0) * 1000,
@@ -118,8 +130,10 @@ def make_nodes(env: Environment, planner: Planner, verifier: Verifier) -> dict:
         if action is None or action.is_terminal():
             return {"step": state["step"] + 1}
 
-        outcome = await verifier(state, action, expect)
+        # Observe FIRST — this capture is both the evidence for verification
+        # and the next step's observation. One capture per step (§8.8).
         obs = await env.observe()
+        outcome, reason = await verifier(state, action, expect, obs)
 
         # Loop detection is over (screen, action), not screen alone: returning
         # to a screen is normal; returning to it and doing the SAME thing is a
@@ -128,11 +142,12 @@ def make_nodes(env: Environment, planner: Planner, verifier: Verifier) -> dict:
         looping = is_looping(state["recent_hashes"], fingerprint)
 
         failures = 0 if outcome == "success" else state["consecutive_failures"] + 1
-        log.info("verify", step=state["step"], outcome=outcome,
+        log.info("verify", step=state["step"], outcome=outcome, reason=reason,
                  consecutive_failures=failures, looping=looping)
 
         return {
             "last_outcome": outcome,
+            "last_reason": reason,
             "consecutive_failures": failures,
             "recent_hashes": push_hash(state["recent_hashes"], fingerprint),
             "looping": looping,
@@ -141,6 +156,8 @@ def make_nodes(env: Environment, planner: Planner, verifier: Verifier) -> dict:
             "app": obs.meta.get("app", ""),
             "bundle_id": obs.meta.get("bundle_id", ""),
             "elements": obs.elements,
+            "screenshot_b64": base64.b64encode(obs.annotated).decode(),
+            "screenshot_plain_b64": base64.b64encode(obs.screenshot).decode(),
             "screen_hash": obs.meta.get("screen_hash", ""),
             "obs_fresh": True,
         }

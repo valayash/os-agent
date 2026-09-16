@@ -27,11 +27,19 @@ class DesktopEnv(Environment):
         *,
         mode: str = "bench",
         approve: ApproveFn | None = None,
+        approval_on: bool = True,
     ) -> None:
         self.adapter = adapter
         self.mode = mode
-        self.executor = Executor(adapter, approve=approve)
+        self.executor = Executor(adapter, approve=approve, approval_on=approval_on)
         self.task: tasks.TaskSpec | None = None
+        # The elements we last showed. act() needs them to turn element_id into
+        # a screen position, and A4 found the alternative the hard way: passing
+        # them through Environment.act() would change the §7 contract, and
+        # NOT passing them meant the executor saw an empty list and refused
+        # every action with "element_id 13 is not on screen (ids present: [])".
+        # The environment already knows what it last rendered. Ask it.
+        self._last_elements: list = []
 
     # ------------------------------------------------------------------
     async def reset(self, task_id: str) -> Observation:
@@ -59,6 +67,7 @@ class DesktopEnv(Environment):
         annotated = annotate(png, elements) if elements else png
         perception_ms = (time.perf_counter() - t0) * 1000
 
+        self._last_elements = elements
         return Observation(
             screenshot=png,
             annotated=annotated,
@@ -82,7 +91,7 @@ class DesktopEnv(Environment):
             return []
 
     async def act(self, actions: list[Action], elements: list | None = None) -> None:
-        obs_elements = elements or []
+        obs_elements = elements if elements is not None else self._last_elements
         self.executor.run(
             actions,
             obs_elements,

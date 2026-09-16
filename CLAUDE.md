@@ -875,11 +875,41 @@ anywhere (§4.2, §11).
 **`import langgraph` appears in exactly one file, `agent/graph.py`** — asserted by a grep in
 the gate. §13's "LangGraph vs custom runtime" ablation stays runnable only while that holds.
 
-### A4 — Real nodes
-Wire `llm/litellm_client.py`. `plan` requests `PlannedAction` as a JSON schema.
-`execute` uses the executor. `verify` checks `expect` with pixel diff only at first.
-**Gate:** agent completes one real task, with approval prompts on. `schema_repair_rate`
-recorded.
+### A4 — Real nodes ✅ PASSED
+`llm/litellm_client.py`, `llm/schema.py`, `agent/prompts.py`, `verify/cheap.py`,
+`telemetry/tracer.py`, `run.py`.
+
+**Gate: `textedit_append` completed end to end against the real model.**
+
+    terminal reason : done        checker: 1.0
+    steps           : 5           llm calls: 5  (1.00 per step)
+    schema repairs  : 0.00/call   cost: $0.0022
+
+The trace, because the interesting part is not that it worked:
+
+| step | planned | verifier |
+|---|---|---|
+| 0 | click the text area | `no_change` — 0.005% pixels |
+| 1 | type "Reviewed" | `success` — **element 13 contains 'Reviewed'** |
+| 2 | click File menu | `success` — screen changed 6.39% |
+| 3 | `cmd+s` | `success` |
+| 4 | done | checker 1.0 |
+
+Step 0 was a real no-op — clicking a text area that already had focus. The verifier said
+so instead of rubber-stamping it, which is the whole argument for four outcomes over a
+bool (§4.4). Step 1 was verified by reading `AXValue`: no model call, no OCR, no pixel
+guessing (§8.7 working on a real screen).
+
+**Two bugs found, both in the plumbing rather than the model:**
+
+1. `--yolo` never reached `policy.requires_approval`, which read the global setting
+   directly. Every action was refused while the log said approval was "on by default".
+   Approval is now a parameter threaded CLI → env → executor → policy. Irreversible
+   targets and dangerous chords still require approval WITH `--yolo` — a convenience flag
+   does not move that line.
+2. The executor received an empty element list, so `element_id 13` could not be resolved.
+   Fixed WITHOUT changing the §7 `Environment` contract: `DesktopEnv` remembers what it
+   last rendered and resolves ids itself.
 
 ### A5 — Reflect, recovery, budget
 Two consecutive failures → reflect with fuller context. Task and suite budgets abort a run.
@@ -1022,6 +1052,38 @@ often small and `MEDIA_RESOLUTION_MEDIUM` compresses the image hard.
 | `high` | 11,475 ms | 220 |
 
 `low` stays the default. `high` is an ablation row, not a setting to reach for.
+
+### MEASURED A4 — the free tier is 20 requests per DAY
+
+    quotaId: GenerateRequestsPerDayPerProjectPerModel-FreeTier
+    quotaValue: 20          <- per DAY, per model, not per minute
+
+A 15-step task needs 15 calls. **The free tier is roughly one task per day.** Quotas are
+per-model, so a swap unblocks — but development past A4 needs billing enabled. At
+~$0.002/task that is cents, and it is the difference between working and not.
+
+### MEASURED A4 — Flash-Lite is 2.6× faster than the model we picked
+
+| model | probe latency | $/1M in/out | free quota left |
+|---|---|---|---|
+| `gemini-3.8-flash` | 4,365 ms | 0.75 / 3.75 | exhausted (20/day) |
+| **`gemini-3.1-flash-lite`** | **1,691 ms** | **0.25 / 1.50** | ✅ |
+| `gemini-3.5-flash-lite` | 1,665 ms | 0.30 / 2.50 | ✅ |
+| `gemini-3.5-flash` | 3,679 ms | 1.50 / 9.00 | ✅ |
+
+Swapping was one env var, which is the §4.9 seam paying off. Accuracy on the suite is
+unmeasured — that is an A6 ablation row, not an assumption.
+
+**But the probe was misleading, and the difference matters.** Those numbers used a blank
+400×300 image. On a REAL screen with a real SoM overlay the same model took **7.4–10.6 s
+per call** at 1,103–1,155 prompt tokens.
+
+    blank image, 564 tokens   ->  1.7 s
+    real screen, 1,103 tokens ->  ~8 s
+
+**The image dominates latency far more than the token count suggests**, which promotes
+`media_resolution` from a minor Phase B row to a primary lever. Benchmark with a real
+screen or do not benchmark.
 
 ### The free tier is not a measurement surface — proven
 

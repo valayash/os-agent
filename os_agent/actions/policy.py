@@ -89,8 +89,21 @@ def _target_label(action: Action, elements: list[Element]) -> str:
     return ""
 
 
-def requires_approval(action: Action, elements: list[Element]) -> str | None:
-    """Reason a human must confirm, or None."""
+def requires_approval(
+    action: Action, elements: list[Element], *, approval_on: bool = True
+) -> str | None:
+    """Reason a human must confirm, or None.
+
+    `approval_on` is a PARAMETER rather than a global settings read. A4 found
+    out why: --yolo set a flag the CLI understood and this function never saw,
+    so every action was refused while the logs said approval was "on by
+    default". A guardrail that cannot be turned off by the documented switch is
+    a bug, not extra safety.
+
+    Note the ordering below — irreversible targets and dangerous chords require
+    approval EVEN WITH --yolo. Those are not a convenience prompt; they are the
+    line §8.6 draws, and a flag does not move it.
+    """
     label = _target_label(action, elements)
     if label and (hit := irreversible_hit(label)):
         return f"target label {label!r} matches irreversible term {hit!r}"
@@ -100,7 +113,7 @@ def requires_approval(action: Action, elements: list[Element]) -> str | None:
         if chord in DANGEROUS_CHORDS:
             return f"dangerous key chord {'+'.join(sorted(chord))}"
 
-    if settings.approval:
+    if approval_on:
         return "approval is on (default); --yolo disables it"
     return None
 
@@ -112,6 +125,7 @@ def check(
     mode: str,
     frontmost_bundle: str,
     allowed_bundles: list[str] | None,
+    approval_on: bool | None = None,
 ) -> Verdict:
     """The single call the executor makes before doing anything."""
     if mode not in MODES:
@@ -132,7 +146,8 @@ def check(
     if action.kind == "click" and action.element_id is None and action.coords is None:
         return Verdict(False, reason="click with neither element_id nor coords")
 
-    if reason := requires_approval(action, elements):
+    on = settings.approval if approval_on is None else approval_on
+    if reason := requires_approval(action, elements, approval_on=on):
         return Verdict(True, needs_approval=True, reason=reason)
 
     return Verdict(True)
