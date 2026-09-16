@@ -1275,6 +1275,40 @@ A plumbing note, because the lever was unreachable without it: `LiteLLMClient._c
 always built an image block, so an empty image was sent as an empty data URI and rejected
 with a 400. Text-only mode was impossible to even try because of four lines of plumbing.
 
+### MEASURED — image encoding. base64 is not a choice; bytes are.
+
+base64 IS the wire format for these APIs — HTTP JSON cannot carry binary, so it is
+mandatory and costs a fixed **+33%** on whatever we produce. The only lever is producing
+fewer bytes before encoding.
+
+Same screen (1440×900 points, 9 elements), all encodings measured:
+
+| encoding | encode time | bytes | +base64 | vs ours |
+|---|---|---|---|---|
+| **PNG compress=1** (ours today) | 14 ms | 292 KB | 389 KB | 1.0× |
+| PNG compress=9 | 118 ms | 245 KB | 326 KB | 1.2× |
+| **JPEG q85** | **3 ms** | **166 KB** | 221 KB | **1.8×** |
+| JPEG q70 | 3 ms | 126 KB | 169 KB | 2.3× |
+| WEBP q85 | **1,335 ms** | 93 KB | 124 KB | 3.1× |
+| half-size JPEG q85 | 1 ms | 51 KB | 69 KB | 5.6× |
+
+**JPEG q85 is free on both axes** — 1.8× smaller AND 4.7× faster to encode than what we do
+now. WEBP compresses best and is disqualified by a 1.3 s encode. Half-size is 5.6× but
+halves the resolution, which would take an 11 px SoM label down to ~5 px; almost certainly
+unreadable, and untested.
+
+**UNTESTED: whether JPEG artifacts hurt grounding.** A1 chose PNG for text fidelity. That
+was reasonable then and is now a guess sitting on the second-largest cost in a step. It
+needs the same controlled treatment the text-only question got: frozen observation, both
+encodings, does it still pick the right element.
+
+**Hypothesis worth testing: the desktop wallpaper is most of the bytes.** We capture the
+FULL screen, and a photographic wallpaper is the worst case for PNG and the best case for
+JPEG. A TextEdit capture measured 2,390 KB — absurd for a mostly-white text document, and
+consistent with a forest photograph dominating the frame. Cropping to the active window
+would remove it entirely, and `scripts/a2_windows.py` already does per-window capture. A
+direct test was inconclusive because the window happened to fill the screen.
+
 ### Why keyboard-first is a step-count lever, not an execution-speed one
 
 Execution is ~500 ms of a ~4,600 ms step. Making the action instant saves 12%, and typing
