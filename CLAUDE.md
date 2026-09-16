@@ -1330,6 +1330,60 @@ The failures section is not optional — it is the credibility.
 
 ---
 
+## 18. Product architecture — EXPLICITLY NOT PART OF THE BENCHMARK
+
+> **Read this before "optimising" anything.** Everything below would make a product faster
+> and would make the benchmark meaningless. The boundary is the point of this section.
+
+### The tier ladder
+
+A task can be done through whichever door is open. Cheapest first:
+
+| Tier | Mechanism | Latency | Good for |
+|---|---|---|---|
+| 0 | direct code / CLI | ~ms | files, spreadsheets, anything shell-able |
+| 1 | **MCP connector** | ~100 ms | Gmail, Slack, Drive, Calendar, GitHub |
+| 2 | app scripting (AppleScript, UNO) | ~100 ms | Messages, Mail, Safari, LibreOffice |
+| 3 | **text-only** — a11y tree, no image | **~626 ms measured** | native apps with good trees |
+| 4 | **text + image** | **~5,443 ms measured** | Electron, canvas, web views, ambiguity |
+
+The 3→4 gap is measured (§13). Tiers 0–2 are another order of magnitude below tier 3.
+"Send an email" through the screen is ~8 steps and ~45 s; through a Gmail connector it is
+one structured call.
+
+### Why none of it may touch the benchmark
+
+1. **§3 defines what this is:** *"No APIs, no application integration."* A computer-use
+   agent that sometimes does not use the computer is measuring something else.
+2. **It would let anyone fake any number.** Route 3 of 15 tasks through a connector and the
+   suite average measures *how many tasks were routed away*, not how fast the agent is. The
+   task mix becomes a dial for producing whatever latency you want. That is the same
+   failure as editing a task after the baseline, and §2 exists to prevent it.
+
+**Every task in the 15 must be one where the screen is genuinely the only door.** A task a
+shell script could do is not testing the agent.
+
+### Why it is nonetheless the right product shape
+
+    request -> ROUTER: which door is open?
+                 tier 0/1/2 available  -> use it        ~100 ms, reliable
+                 good accessibility tree -> text-only   ~600 ms
+                 otherwise             -> screen+vision ~5 s, always works
+
+Two things make this commercially strong:
+
+- **The router is itself a measurable component.** "What fraction of real requests can be
+  served below tier 3?" is a number nobody publishes.
+- **The moat is the BOTTOM tier, not the top.** Connectors are a weekend's work and are
+  commoditising. The hard part — and the measured part — is the fallback that works when no
+  connector exists. Connectors make a product fast; the screen agent makes it complete.
+
+The agent's value is inversely proportional to how many doors are already open. The doors
+are opening, but the closed half grows faster: every new SaaS tool ships a UI before it
+ships an API.
+
+---
+
 ## 17.5 Field state — checked 2026-09-17
 
 **The accuracy problem is solved. This changes what "match published accuracy" costs.**
