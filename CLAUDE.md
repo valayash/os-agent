@@ -1205,14 +1205,30 @@ time, not tokenization. PNG size varies ~10× with screen content, so image late
 is part of that; JPEG was measured at A1 as 2.3 ms to encode against PNG's 13 ms and
 similar size, and was passed over for text fidelity. That trade needs re-examining.
 
-**ACCURACY IS UNMEASURED.** The grounding half of this experiment was invalid — TextEdit
-lost focus mid-run (§5.3 again), so the captures were of a different app and every "did it
-pick the right element" result is meaningless. We know text-only is much faster. We do not
-know whether it still clicks the right thing, which is the question that decides whether it
-is usable at all.
+**ACCURACY, MEASURED — controlled run on TextEdit, `groq/qwen/qwen3.8-27b`:**
 
-**Redo at A6 against the frozen suite**, per app, because the answer almost certainly
-differs by toolkit: WhatsApp's tree names every row unambiguously (25 clean elements),
+One observation captured and FROZEN, both modes run against it so focus could not drift:
+
+| mode | latency | prompt tokens | picked | correct |
+|---|---|---|---|---|
+| text + image | 5,443 ms | 2,370 | `[13,13,13]` | **3/3** |
+| **text only** | **626 ms** | **576** | `[13,13,13]` | **3/3** |
+
+**8.7× faster, 4× fewer prompt tokens, identical accuracy.** The image cost 4.8 seconds
+and contributed nothing.
+
+Why it contributed nothing is the important part: element 13 is named
+`'alpha\nbeta\ngamma'`. The text list alone is unambiguous, so the picture had no
+information to add. **This is the BEST case, not the general case** — TextEdit has an
+excellent accessibility tree. n=3, one app, one task.
+
+**Second-order effect, and it changes the next priority.** A step with the image is
+77 + 5,443 + 500 + 25 = 6,045 ms; without it, 77 + 626 + 500 + 25 = **1,228 ms**. The blind
+`sleep(0.5)` settle goes from 8% of a step to **40%** of one. Remove the dominant cost and
+the next one becomes visible — adaptive settle moves up the list the moment this lands.
+
+**Still to test at A6, per app**, because TextEdit is the favourable case and the answer
+almost certainly differs by toolkit: WhatsApp's tree names every row unambiguously (25 clean elements),
 while Safari boxes label text rather than tiles and Electron apps expose almost nothing
 (§8.4). The likely outcome is not "text-only wins" but **"text-only wins where the tree is
 good"** — which would make it an adaptive choice per observation rather than a global
