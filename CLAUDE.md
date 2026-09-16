@@ -240,6 +240,43 @@ quietly rather than erroring:
 > keyboard (§5.3). Discovering any of these halfway through a suite invalidates the run,
 > and none of them announces itself.
 
+### 5.4 Multi-window is not supported, and one untested question decides whether it can be
+
+`raw_tree()` walks the frontmost app's FOCUSED WINDOW ONLY. Everything else is invisible,
+so a task spanning two windows is currently impossible — not degraded, impossible.
+
+**Perception is already solved.** `scripts/a2_windows.py` (A2) walks any window by pid with
+no focus required, proven across seven apps. Feeding the planner a combined element list
+tagged by window is plumbing we have largely written.
+
+**The blocker is switching, and it rests on one untested question:**
+
+> Does a synthetic CGEvent click RAISE a background window?
+
+§5.3 established that every programmatic ACTIVATION api is blocked. A click is a different
+mechanism — it reaches the HID event tap and is indistinguishable from a human hand. If it
+raises, the agent switches windows the way a person does and multi-window becomes
+tractable. If it does not, multi-window is blocked outright on macOS.
+
+**This has not been tested.** An attempt at A5 failed to set up the conditions: the window
+list changed between two consecutive commands (four Finder windows, then only one Claude
+window), which is §5.3's instability again. It needs two overlapping windows from different
+apps that stay put, and then it is a single command.
+
+**A third path sidesteps the question entirely: the clipboard.** For the common case —
+"copy these figures into that email" — both windows never need to be visible at once.
+`cmd+c`, switch, `cmd+v`. That turns a multi-window problem into a sequence of
+single-window steps, which the agent already handles, and it is how a person does it.
+
+**Phase A stays single-window, and all 15 tasks must be single-window.** Multi-window is a
+separate capability with its own failure modes (which window does element 7 belong to?
+what happens when a window moves mid-task?), and mixing it into the baseline would mean the
+suite measures two things at once. Add it after A6, with its own tasks and its own row.
+
+Cost note if it is ever added: element counts add up. Finder alone was 91 elements
+(~1,365 prompt tokens, §8.4). Two dense windows would roughly double the prompt — which,
+given §13's finding that image and prompt size dominate latency, is not free.
+
 ### 5.2 Fixed-size vs bounded
 
 > **Fields that enter the prompt must be fixed-size. Bookkeeping fields need only be bounded.**
