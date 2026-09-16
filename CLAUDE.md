@@ -1338,6 +1338,41 @@ in the action space.
 > the §5.3 wall — the agent goes blind to everything else. Resize to fill the display
 > instead: same Space, same visibility, all of the benefit.
 
+### MEASURED — SVG is not the answer, and why is instructive
+
+Asked whether sending an SVG schematic instead of a raster image would be faster. It is a
+real technique for charts and diagrams, where the content is natively vector and the model
+gets exact values instead of reading pixels. It does not apply here: there is no vector
+form of a rendered Finder window. Tracing the bitmap produces thousands of meaningless
+paths; the only SVG we could produce is one SYNTHESISED from the accessibility tree.
+
+Measured on a real screen, same information both ways:
+
+| encoding | tokens per element |
+|---|---|
+| **our text list** | **6.2** |
+| synthesised SVG | 26.8 (**4.3×**) |
+| the image | ~1,730 total |
+
+SVG lands between the two — cheaper than a picture, 4.3× more expensive than what we
+already send. XML spends most of its tokens on syntax, but the deeper reason is that
+**our list carries no coordinates at all.** The model picks a NUMBER; resolving that number
+to a screen position is our arithmetic, not its judgement. SVG carries geometry the model
+has no use for.
+
+Text-only is the same idea taken further: SVG removes the vision encoder and keeps the
+geometry; we removed both.
+
+**The successor idea — adaptive disambiguation.** Text-only should fail where names
+collide: three buttons all called "Delete". The fix is not the image and not SVG, but a
+COARSE positional hint on the ambiguous ones only —
+
+    [12] button 'Delete'  (top right)
+    [19] button 'Delete'  (row 3)
+
+Three tokens each, spent only where the list is genuinely ambiguous. Phase B candidate, and
+the natural successor to the text-only result.
+
 ### Why keyboard-first is a step-count lever, not an execution-speed one
 
 Execution is ~500 ms of a ~4,600 ms step. Making the action instant saves 12%, and typing
