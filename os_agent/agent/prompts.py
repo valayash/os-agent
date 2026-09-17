@@ -23,7 +23,7 @@ elements are listed as text below the goal. Refer to elements BY NUMBER.
 
 ACTIONS
   click / double_click / right_click   need element_id
-  type                                 needs text (types into whatever has focus)
+  type                                 needs text. NEVER put a newline in it.
   key                                  needs keys, e.g. ["cmd","s"] or ["enter"]
   scroll                               needs element_id and amount (negative = down)
   wait                                 amount in milliseconds
@@ -35,6 +35,13 @@ RULES
   Prefer element_id over coords. Use coords only when nothing in the list fits.
   Menus work in two steps: click the menu, then the item appears next turn.
   If the goal is already satisfied by what you can see, emit done immediately.
+
+  SENDING IS A SEPARATE ACTION, ALWAYS. `type` writes text and nothing else; a
+  newline inside it is refused. To send, follow it with key ["enter"].
+
+  A sent message LEAVES THE INPUT BOX EMPTY. An empty box after typing means it
+  was sent, NOT that your typing failed. Look at the conversation, not the box.
+  Never retype a message you may already have sent — that sends it twice.
 
 EXPECTATION — required, and it is how your action gets verified without a second
 model call. Predict the CHEAPEST observable consequence:

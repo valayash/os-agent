@@ -39,6 +39,27 @@ IRREVERSIBLE: set[str] = {
 # catastrophic for a send.
 COMMIT_KEYS: set[frozenset[str]] = {frozenset({"enter"}), frozenset({"return"})}
 
+# MEASURED 2026-09-17, and it cost a real person eight unwanted messages.
+#
+# COMMIT_KEYS above only ever looked at action.kind == "key". The agent never
+# pressed Enter. It put NEWLINES INSIDE THE TYPED TEXT — 45 characters of
+# message plus two "\n" arrived as 47 chars — and type_text typed them
+# faithfully. In a chat window a newline IS the send button, so one `type`
+# action sent three message fragments ("Bhond", "Subah 10 baje utha dena
+# yaarBhond", ...) while the policy saw a harmless keystroke.
+#
+# Then it got worse, and the reason is the important part. Sending EMPTIES the
+# input box. The model looked at the next screenshot, saw an empty box,
+# concluded its typing had failed, and typed again. Every retry sent more.
+# The verifier called each one `success` because the screen had changed — it
+# had: a new message appeared in the thread.
+#
+# A silent outward commit plus a verifier that reads "something changed" as
+# "what I wanted happened" is an unbounded send loop. Both halves are fixed:
+# a newline can no longer hide inside `type`, and a repeated commit needs a
+# human regardless of --yolo.
+MAX_COMMITS_PER_RUN = 3
+
 # Key combinations that destroy things regardless of what the button says.
 DANGEROUS_CHORDS: set[frozenset[str]] = {
     frozenset({"command", "delete"}),      # move to trash (Finder)
@@ -90,6 +111,23 @@ def path_in_sandbox(path: str | Path) -> bool:
         return False
 
 
+def commits_outward(action: Action) -> str | None:
+    """Does this action push something into the world? Reason, or None.
+
+    "Outward" means a side effect that leaves the machine or cannot be undone
+    from the keyboard: a message sent, a form submitted, an email away. The
+    defining property is that the SCREEN AFTERWARDS LOOKS LIKE NOTHING
+    HAPPENED — the compose box empties — which is exactly the state that makes
+    an agent retry.
+    """
+    if action.kind == "key" and action.keys:
+        if frozenset(k.lower() for k in action.keys) in COMMIT_KEYS:
+            return "Enter commits the current input"
+    if action.kind == "type" and action.text and ("\n" in action.text or "\r" in action.text):
+        return "typed text contains a newline, which commits in any message field"
+    return None
+
+
 def _target_label(action: Action, elements: list[Element]) -> str:
     if action.element_id is None:
         return ""
@@ -123,10 +161,14 @@ def requires_approval(
         chord = frozenset(k.lower() for k in action.keys)
         if chord in DANGEROUS_CHORDS:
             return f"dangerous key chord {'+'.join(sorted(chord))}"
-        if chord in COMMIT_KEYS and repeated:
-            return ("this exact action already ran this session and could not be "
-                    "verified — repeating it may duplicate an outward-facing side "
-                    "effect such as sending a message")
+
+    # Outward commits, of ANY action kind. `repeated` is the signal that
+    # matters: the first send is what the user asked for, the second is the
+    # agent failing to notice the first one worked.
+    if (commit := commits_outward(action)) and repeated:
+        return (f"{commit}, and this exact action already ran this session. "
+                "Repeating it duplicates an outward side effect such as "
+                "sending a message.")
 
     if approval_on:
         return "approval is on (default); --yolo disables it"

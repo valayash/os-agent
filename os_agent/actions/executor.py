@@ -10,7 +10,12 @@ from collections.abc import Callable
 
 import structlog
 
-from os_agent.actions.policy import Verdict, check
+from os_agent.actions.policy import (
+    MAX_COMMITS_PER_RUN,
+    Verdict,
+    check,
+    commits_outward,
+)
 from os_agent.desktop.base import DesktopAdapter
 from os_agent.env.base import ApprovalDenied, PolicyViolation
 from os_agent.types import Action, Element
@@ -41,6 +46,10 @@ class Executor:
         # A5: verification was blind, the agent assumed failure, and retried
         # something that had already worked (§8.6).
         self._executed: set[tuple] = set()
+        # Outward commits are counted, not just deduped. Dedup alone does not
+        # stop a send loop: the model varied its text slightly each time, so
+        # every fingerprint was "new" while every message was unwanted.
+        self._commits = 0
 
     def run(
         self,
@@ -73,6 +82,16 @@ class Executor:
 
             if action.is_terminal():
                 continue
+
+            if commit := commits_outward(action):
+                if self._commits >= MAX_COMMITS_PER_RUN:
+                    raise PolicyViolation(
+                        f"refusing a {self._commits + 1}th outward commit in one run "
+                        f"({commit}). A run that sends this many times is looping, "
+                        f"not working — cap is MAX_COMMITS_PER_RUN={MAX_COMMITS_PER_RUN}."
+                    )
+                self._commits += 1
+                log.warning("act.commit", n=self._commits, kind=action.kind, why=commit)
 
             self._dispatch(action, elements)
             self._executed.add(fingerprint)
@@ -117,6 +136,22 @@ class Executor:
         elif k == "type":
             if action.text is None:
                 raise PolicyViolation("type action with no text")
+            # ONE ACTION KIND, ONE EFFECT.
+            #
+            # A newline inside typed text is an invisible Enter. It commits in
+            # every message field on the machine, and no label-based guard can
+            # see it, because there is no label — it is a character. Refusing
+            # it here forces the planner to say what it means with an explicit
+            # `key: enter`, which the policy DOES inspect (commits_outward).
+            #
+            # This is the difference between a guardrail and a guardrail that
+            # can be walked around without noticing.
+            if "\n" in action.text or "\r" in action.text:
+                raise PolicyViolation(
+                    "typed text contains a newline, which would send/commit "
+                    "silently. Type the text, then emit a separate "
+                    "{'kind': 'key', 'keys': ['enter']} action to commit it."
+                )
             log.info("act.type", chars=len(action.text))
             self.adapter.type_text(action.text)
         elif k == "key":

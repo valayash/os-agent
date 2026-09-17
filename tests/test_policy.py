@@ -84,3 +84,57 @@ def test_sandbox_confinement():
     assert not policy.path_in_sandbox("/etc/passwd")
     # the classic escape
     assert not policy.path_in_sandbox("~/os-agent-sandbox/../../.ssh/id_rsa")
+
+
+# --- outward commits (2026-09-17: eight unwanted WhatsApp messages) --------
+
+def test_newline_in_typed_text_is_an_outward_commit():
+    """The hole that sent the messages: no label, no key, just a character."""
+    assert policy.commits_outward(Action(kind="type", text="hi\nthere"))
+    assert policy.commits_outward(Action(kind="key", keys=["enter"]))
+    assert policy.commits_outward(Action(kind="type", text="hi there")) is None
+    assert policy.commits_outward(Action(kind="click", element_id=3)) is None
+
+
+def test_repeated_commit_needs_a_human_even_with_yolo():
+    a = Action(kind="key", keys=["enter"])
+    assert policy.requires_approval(a, [], approval_on=False, repeated=False) is None
+    reason = policy.requires_approval(a, [], approval_on=False, repeated=True)
+    assert reason and "already ran" in reason
+
+
+def test_executor_refuses_a_newline_inside_type():
+    from os_agent.actions.executor import Executor
+    from os_agent.env.base import PolicyViolation
+
+    class _Adapter:
+        def frontmost_app(self): return ("Test", "com.test")
+        def screen_size_points(self): return (1440, 900)
+        def type_text(self, text): raise AssertionError("must never be reached")
+
+    ex = Executor(_Adapter(), approve=lambda *_: True, approval_on=False)
+    with pytest.raises(PolicyViolation, match="newline"):
+        ex.run([Action(kind="type", text="hello\n")], [],
+               mode="freeform", allowed_bundles=None)
+
+
+def test_executor_caps_outward_commits_per_run():
+    from os_agent.actions.executor import Executor
+    from os_agent.env.base import PolicyViolation
+
+    sent = []
+
+    class _Adapter:
+        def frontmost_app(self): return ("Test", "com.test")
+        def screen_size_points(self): return (1440, 900)
+        def press_keys(self, keys): sent.append(keys)
+
+    ex = Executor(_Adapter(), approve=lambda *_: True, approval_on=False)
+    # Distinct text each time so dedup cannot be what stops it — the CAP must.
+    for i in range(policy.MAX_COMMITS_PER_RUN):
+        ex.run([Action(kind="key", keys=["enter"], text=f"m{i}")], [],
+               mode="freeform", allowed_bundles=None)
+    assert len(sent) == policy.MAX_COMMITS_PER_RUN
+    with pytest.raises(PolicyViolation, match="outward commit"):
+        ex.run([Action(kind="key", keys=["enter"], text="one too many")], [],
+               mode="freeform", allowed_bundles=None)
