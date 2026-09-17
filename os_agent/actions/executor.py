@@ -109,6 +109,14 @@ class Executor:
             try:
                 self._dispatch(action, elements)
             except (ActionError, PolicyViolation, ApprovalDenied):
+                # An action that was REFUSED never reached the world, so it
+                # must not spend a commit slot. Found by running the newline
+                # case against the real adapter: `act.commit n=1` was logged
+                # for a `type` that _dispatch then refused, so three bad
+                # newlines would have hit the cap and ended the run — a
+                # terminal outcome caused entirely by a recoverable mistake.
+                if commit:
+                    self._commits -= 1
                 raise
             except Exception as exc:  # noqa: BLE001
                 log.warning("act.failed", kind=action.kind,

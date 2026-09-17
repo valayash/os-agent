@@ -209,3 +209,20 @@ def test_steps_are_on_disk_before_close_is_called(tmp_path, monkeypatch):
     rec = json.loads(lines[0])
     assert rec["action"]["text"] == "hello", "the field we needed and did not have"
     assert json.loads((w.dir / "meta.json").read_text())["goal"] == "send a message"
+
+
+def test_a_refused_action_does_not_spend_a_commit_slot():
+    """It never reached the world, so it must not count against the cap."""
+    from os_agent.actions import policy
+
+    ex = _exec()
+    for _ in range(policy.MAX_COMMITS_PER_RUN + 2):
+        with pytest.raises(ActionError, match="newline"):
+            _run(ex, Action(kind="type", text="hi\n"))
+    assert ex._commits == 0, "refused commits were counted against the cap"
+
+    # and the cap itself still works for commits that DO happen
+    for i in range(policy.MAX_COMMITS_PER_RUN):
+        _run(ex, Action(kind="key", keys=["enter"], text=f"m{i}"))
+    with pytest.raises(PolicyViolation, match="outward commit"):
+        _run(ex, Action(kind="key", keys=["enter"], text="over"))
