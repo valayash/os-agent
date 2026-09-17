@@ -15,10 +15,10 @@ Later it also replays RECORDED trajectories (§4.6), which is how Phase B's
 trajectory cache and speculation predictor get evaluated offline.
 """
 
-import hashlib
 from dataclasses import dataclass, field
 
 from os_agent.env.base import Environment
+from os_agent.perception.elements import screen_fingerprint
 from os_agent.types import Action, Element, Observation
 
 
@@ -50,8 +50,7 @@ class Screen:
         for the same reason trajectories do (§4.7): ids renumber, so hashing
         them would make two identical screens look different.
         """
-        blob = "|".join(e.key() for e in self.elements)
-        return hashlib.sha1(blob.encode()).hexdigest()[:12]
+        return screen_fingerprint(self.elements)
 
 
 class ReplayEnv(Environment):

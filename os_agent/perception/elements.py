@@ -15,6 +15,8 @@ The first failure is a LATENCY failure. That is why perception belongs in a
 project about latency and not in an appendix.
 """
 
+import hashlib
+
 import structlog
 
 from os_agent.types import Element, RawNode
@@ -126,3 +128,27 @@ def to_elements(nodes: list[RawNode], *, app: str = "") -> list[Element]:
         )
 
     return elements
+
+
+def screen_fingerprint(elements: list[Element]) -> str:
+    """Stable identity of a screen, for loop detection (§8.8).
+
+    Built from Element.key() — role|name|bbox — never from the positional id,
+    for the same reason trajectories are (§4.7): ids renumber every
+    observation, so hashing them would make two IDENTICAL screens look
+    different and the loop detector would never fire.
+
+    It lives here, in platform-neutral perception, because BOTH environments
+    need the same answer. It used to live inside replay_env only, and
+    DesktopEnv simply never set the field:
+
+        fingerprint = f"{state['screen_hash']}|{kind}|{element_id}"
+                    = f"|type|None"          <- on the real machine, always
+
+    Loop detection had quietly degraded to "same action kind twice", ignoring
+    the screen entirely. Every test passed, because every test runs through
+    replay_env — the one path that set it. Two implementations of one fact is
+    how that happens; there is now one.
+    """
+    blob = "|".join(e.key() for e in elements)
+    return hashlib.sha1(blob.encode()).hexdigest()[:12]

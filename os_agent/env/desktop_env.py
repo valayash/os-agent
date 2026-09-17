@@ -13,7 +13,7 @@ from os_agent.actions.executor import ApproveFn, Executor
 from os_agent.bench import tasks
 from os_agent.desktop.base import DesktopAdapter, NotOnThisPlatform
 from os_agent.env.base import Environment
-from os_agent.perception.elements import to_elements
+from os_agent.perception.elements import screen_fingerprint, to_elements
 from os_agent.perception.som import annotate
 from os_agent.types import Action, Observation
 
@@ -76,6 +76,9 @@ class DesktopEnv(Environment):
                 "app": name,
                 "bundle_id": bundle,
                 "scale": ratio,
+                # Loop detection reads this. Without it the detector is blind
+                # to the screen and fires on action kind alone.
+                "screen_hash": screen_fingerprint(elements),
                 "raw_nodes": len(nodes),
                 "perception_ms": round(perception_ms, 1),
                 "elements": len(elements),
