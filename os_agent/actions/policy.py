@@ -141,6 +141,7 @@ def check(
     frontmost_bundle: str,
     allowed_bundles: list[str] | None,
     approval_on: bool | None = None,
+    repeated: bool = False,
 ) -> Verdict:
     """The single call the executor makes before doing anything."""
     if mode not in MODES:
@@ -162,7 +163,7 @@ def check(
         return Verdict(False, reason="click with neither element_id nor coords")
 
     on = settings.approval if approval_on is None else approval_on
-    if reason := requires_approval(action, elements, approval_on=on):
+    if reason := requires_approval(action, elements, approval_on=on, repeated=repeated):
         return Verdict(True, needs_approval=True, reason=reason)
 
     return Verdict(True)

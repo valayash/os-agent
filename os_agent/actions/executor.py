@@ -36,6 +36,11 @@ class Executor:
         self.adapter = adapter
         self.approve = approve
         self.approval_on = approval_on
+        # Every action already executed this run. A repeated COMMIT action —
+        # Enter in a chat window — is how the same message got sent twice at
+        # A5: verification was blind, the agent assumed failure, and retried
+        # something that had already worked (§8.6).
+        self._executed: set[tuple] = set()
 
     def run(
         self,
@@ -48,6 +53,7 @@ class Executor:
         """Execute in order. Any refusal aborts the whole list."""
         for action in actions:
             _, bundle = self.adapter.frontmost_app()
+            fingerprint = self._fingerprint(action)
             verdict = check(
                 action,
                 elements,
@@ -55,6 +61,7 @@ class Executor:
                 frontmost_bundle=bundle,
                 allowed_bundles=allowed_bundles,
                 approval_on=self.approval_on,
+                repeated=fingerprint in self._executed,
             )
             if not verdict.allowed:
                 log.warning("policy.refused", kind=action.kind, reason=verdict.reason)
@@ -68,9 +75,16 @@ class Executor:
                 continue
 
             self._dispatch(action, elements)
+            self._executed.add(fingerprint)
             time.sleep(SETTLE_S)
 
     # ----------------------------------------------------------------------
+    @staticmethod
+    def _fingerprint(action: Action) -> tuple:
+        """Identity of an action, for "have I already done this?"."""
+        return (action.kind, action.element_id, action.text,
+                tuple(action.keys or ()), action.coords)
+
     def _point(self, action: Action, elements: list[Element]) -> tuple[int, int]:
         if action.coords is not None:
             x, y = action.coords
