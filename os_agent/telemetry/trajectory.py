@@ -84,13 +84,33 @@ class TrajectoryWriter:
             "started_at": stamp,
         }
         self.steps: list[StepRecord] = []
+        # Written up front so a killed run still says what it was trying.
+        (self.dir / "meta.json").write_text(json.dumps(self.meta, indent=2))
 
     def add(self, rec: StepRecord, screenshot_png: bytes | None = None) -> None:
+        """Record one step — AND FLUSH IT TO DISK IMMEDIATELY.
+
+        Steps used to live in memory until close(), so Ctrl+C threw the entire
+        run away. That is backwards: the runs you most need to read are
+        exactly the ones you had to kill. It cost us a real diagnosis — a
+        killed WhatsApp run left an EMPTY directory, so the question "what did
+        the model actually type?" had to be answered by arithmetic on the
+        console log instead of by reading the field.
+
+        JSONL, appended a line at a time, because a partial run must still be
+        a readable file. trajectory.json is still written by close() for a run
+        that finishes normally; steps.jsonl is what survives a kill.
+        """
         if screenshot_png:
             path = self.frames / f"{rec.step:03d}.png"
             path.write_bytes(screenshot_png)
             rec.screenshot = str(path.relative_to(self.dir))
         self.steps.append(rec)
+        try:
+            with (self.dir / "steps.jsonl").open("a") as fh:
+                fh.write(json.dumps(asdict(rec), default=str) + "\n")
+        except OSError as exc:  # never let bookkeeping kill a run
+            log.warning("trajectory.flush_failed", error=str(exc)[:120])
 
     def close(self, result: dict) -> Path:
         out = self.dir / "trajectory.json"

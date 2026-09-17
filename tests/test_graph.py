@@ -138,3 +138,22 @@ async def test_state_does_not_grow_with_steps():
     assert len(final["recent_hashes"]) <= 8
     for forbidden in ("messages", "history", "screenshots", "observations"):
         assert forbidden not in final, f"{forbidden!r} appeared in state — §11 violation"
+
+
+def test_langgraph_is_imported_in_exactly_one_file():
+    """CLAUDE.md A3 claims this and nothing enforced it.
+
+    §13 lists "LangGraph vs custom runtime" as an ablation row. A framework
+    that has leaked into env/, llm/, run.py or verify/ cannot be swapped, and
+    the row becomes unrunnable. run.py needed the recursion error and nearly
+    imported langgraph directly to get it; graph.py re-exports it instead.
+    """
+    import pathlib
+
+    root = pathlib.Path(__file__).resolve().parents[1] / "os_agent"
+    leaked = [
+        str(f.relative_to(root))
+        for f in root.rglob("*.py")
+        if "langgraph" in f.read_text() and f.name != "graph.py"
+    ]
+    assert not leaked, f"langgraph leaked outside agent/graph.py: {leaked}"

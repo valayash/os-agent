@@ -141,3 +141,71 @@ async def test_a_recoverable_failure_does_not_end_the_run():
 
     assert terminal_reason(final) == "done", "a stale id must not end the run"
     assert final["step"] >= 2, "it should have kept going after the bad action"
+
+
+# --- #4: the step cap the CLI asked for is the one that fires -------------
+
+@pytest.mark.asyncio
+async def test_cli_max_steps_is_the_cap_that_actually_stops_the_run():
+    """--max-steps used to change only LangGraph's recursion_limit.
+
+    The router kept reading settings.max_steps (the env var, default 50), so
+    a low CLI value meant the graph sailed past it and died of
+    GraphRecursionError — a crash with no summary, instead of a clean stop.
+    """
+    from os_agent.agent.graph import build_graph, terminal_reason
+    from os_agent.agent.state import initial_state
+    from os_agent.config import settings
+    from os_agent.env.replay_env import ReplayEnv, Screen, fake_elements
+    from os_agent.llm.base import LLMResult
+    from os_agent.types import Expectation, PlannedAction
+
+    assert settings.max_steps > 5, "this test needs the global default to differ"
+
+    async def planner(state):
+        p = PlannedAction(reasoning="r", subgoal="s",
+                          action=Action(kind="click", element_id=0),
+                          expect=Expectation(kind="screen_changed"), confidence=0.5)
+        return LLMResult(parsed=p, prompt_tokens=0, completion_tokens=0,
+                         latency_ms=0.0, provider_wait_ms=0.0, cost_usd=0.0,
+                         repairs=0, model="stub", provider="stub")
+
+    async def verifier(state, action, expect, after):
+        return "success", "ok"
+
+    # Screens never repeat, so the loop detector cannot be what stops it.
+    env = ReplayEnv([Screen(elements=fake_elements(n)) for n in range(3, 40)])
+    app = build_graph(env, planner, verifier, approval=False)
+    final = await app.ainvoke(initial_state("g", max_steps=5),
+                              config={"recursion_limit": 5 * 6})
+
+    assert final["step"] == 5, f"stopped at {final['step']}, expected the CLI cap of 5"
+    assert terminal_reason(final) == "max_steps"
+
+
+# --- #5: a killed run still leaves its steps on disk -----------------------
+
+def test_steps_are_on_disk_before_close_is_called(tmp_path, monkeypatch):
+    """Ctrl+C used to throw the whole run away — close() wrote everything."""
+    import json
+
+    from os_agent.telemetry import trajectory as traj_mod
+
+    monkeypatch.setattr(traj_mod, "RUNS", tmp_path)
+    w = traj_mod.TrajectoryWriter("freeform", "send a message", "m", "p")
+
+    w.add(traj_mod.StepRecord(
+        step=0, app="WhatsApp", bundle_id="net.whatsapp.WhatsApp",
+        subgoal="type the message", reasoning="r",
+        action={"kind": "type", "text": "hello"}, action_target=None,
+        expect=None, outcome="", reason="", elements=25, perception_ms=1.0,
+        llm_latency_ms=1.0, provider_wait_ms=0.0, prompt_tokens=1,
+        completion_tokens=1, cost_usd=0.0, repairs=0,
+    ))
+
+    # close() deliberately NOT called — this is the killed-run case.
+    lines = (w.dir / "steps.jsonl").read_text().strip().splitlines()
+    assert len(lines) == 1
+    rec = json.loads(lines[0])
+    assert rec["action"]["text"] == "hello", "the field we needed and did not have"
+    assert json.loads((w.dir / "meta.json").read_text())["goal"] == "send a message"

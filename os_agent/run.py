@@ -16,7 +16,11 @@ import time
 
 import structlog
 
-from os_agent.agent.graph import build_graph, terminal_reason
+from os_agent.agent.graph import (
+    RecursionLimitReached,
+    build_graph,
+    terminal_reason,
+)
 from os_agent.agent.nodes import Planner, Verifier
 from os_agent.agent.prompts import REFLECT_SYSTEM, SYSTEM, build_reflect_user, build_user
 from os_agent.agent.state import AgentState, initial_state
@@ -226,15 +230,29 @@ async def run_task(goal: str, task_id: str, *, yolo: bool, max_steps: int | None
         approval=False,
     )
 
-    state = initial_state(goal=goal, task_id=task_id)
+    state = initial_state(goal=goal, task_id=task_id, max_steps=max_steps)
     if task_id != "freeform":
         await env.reset(task_id)
         state["obs_fresh"] = False
 
+    cap = max_steps or settings.max_steps
     t0 = time.perf_counter()
-    final: AgentState = await app.ainvoke(
-        state, config={"recursion_limit": (max_steps or settings.max_steps) * 6}
-    )
+    try:
+        final: AgentState = await app.ainvoke(
+            state, config={"recursion_limit": cap * 6},
+        )
+    except RecursionLimitReached:
+        # The graph should stop itself at `cap` steps; this is the backstop.
+        # Reaching it means a routing bug, so say that rather than dying with
+        # a framework traceback and losing the run's numbers.
+        log.error("graph.recursion_limit", cap=cap,
+                  note="the router should have stopped first — routing bug")
+        final = dict(state, status="failed", terminal_reason="recursion_limit")
+    except KeyboardInterrupt:
+        # Ctrl+C still gets a summary and a closed trajectory. The runs you
+        # most want to read are the ones you had to stop.
+        log.warning("run.interrupted", note="Ctrl+C — writing what we have")
+        final = dict(state, status="failed", terminal_reason="interrupted")
     wall = time.perf_counter() - t0
 
     score = env.evaluate() if task_id != "freeform" else None

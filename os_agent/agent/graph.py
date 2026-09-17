@@ -13,6 +13,7 @@ unrunnable. Containing it here is what keeps that experiment possible.
                                        └─ other ────→ reflect ─┴→ END(fail)
 """
 
+from langgraph.errors import GraphRecursionError
 from langgraph.graph import END, StateGraph
 
 from os_agent.agent.nodes import Planner, Reflector, Verifier, make_nodes
@@ -23,6 +24,12 @@ from os_agent.agent.state import (
 )
 from os_agent.config import settings
 from os_agent.env.base import Environment
+
+# Re-exported so run.py can catch it WITHOUT importing langgraph itself.
+# §13's "LangGraph vs custom runtime" ablation is only runnable while the
+# framework stays contained in this file; a custom runtime would raise its own
+# error and re-alias it here, and nothing else would change.
+RecursionLimitReached = GraphRecursionError
 
 
 def route_after_verify(state: AgentState) -> str:
@@ -46,7 +53,7 @@ def route_after_verify(state: AgentState) -> str:
         return "halted"
 
     # 3. hard caps — money and time. Checked before any progress condition.
-    if state["step"] >= settings.max_steps:
+    if state["step"] >= state.get("max_steps", settings.max_steps):
         return "max_steps"
     if state["cost_usd"] >= settings.task_budget_usd:
         return "budget"
@@ -132,7 +139,7 @@ def terminal_reason(state: AgentState) -> str:
         return "done"
     if action is not None and action.kind == "fail":
         return "agent_fail"
-    if state["step"] >= settings.max_steps:
+    if state["step"] >= state.get("max_steps", settings.max_steps):
         return "max_steps"
     if state["cost_usd"] >= settings.task_budget_usd:
         return "budget"

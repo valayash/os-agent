@@ -26,6 +26,7 @@ is REBUILT from state each step, never appended to (§4.2, §11).
 
 from typing import TypedDict
 
+from os_agent.config import settings
 from os_agent.types import Action, Element, Expectation
 
 # Bounded bookkeeping (§5.2): these never enter the prompt, so they only need
@@ -72,6 +73,11 @@ class AgentState(TypedDict, total=False):
 
     # -- counters ----------------------------------------------------------
     step: int
+    # The cap for THIS run. In state, not read from settings by the router:
+    # --max-steps used to set only LangGraph's recursion_limit while the
+    # router kept reading the env var, so the run sailed past the CLI value
+    # and died of GraphRecursionError instead of stopping cleanly.
+    max_steps: int
     llm_calls: int  # the numerator of THE metric (§1)
     consecutive_failures: int
     reflections: int
@@ -87,7 +93,8 @@ class AgentState(TypedDict, total=False):
     terminal_reason: str  # done | max_steps | stuck | budget | error | agent_fail
 
 
-def initial_state(goal: str, task_id: str = "freeform") -> AgentState:
+def initial_state(goal: str, task_id: str = "freeform",
+                  max_steps: int | None = None) -> AgentState:
     """Every field explicitly initialised.
 
     LangGraph tolerates missing keys, but a node that reads one and gets None
@@ -114,6 +121,7 @@ def initial_state(goal: str, task_id: str = "freeform") -> AgentState:
         facts=[],
         reflection_note="",
         step=0,
+        max_steps=settings.max_steps if max_steps is None else max_steps,
         llm_calls=0,
         consecutive_failures=0,
         reflections=0,
