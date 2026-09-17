@@ -15,6 +15,7 @@ import time
 
 import pyautogui
 import Quartz
+import structlog
 from AppKit import NSScreen, NSWorkspace
 from ApplicationServices import (
     AXUIElementCopyAttributeValue,
@@ -31,6 +32,8 @@ from os_agent.types import RawNode
 
 # Slam the cursor into a screen corner to abort everything. The only kill
 # switch that works while the agent is mid-action (CLAUDE.md §8.5).
+log = structlog.get_logger(__name__)
+
 pyautogui.FAILSAFE = True
 
 # ---------------------------------------------------------------------------
@@ -201,13 +204,48 @@ class MacOSAdapter:
 
     # -- context -----------------------------------------------------------
     def frontmost_app(self) -> tuple[str, str]:
+        """(display_name, bundle_id), cross-checked against the window server.
+
+        MEASURED A5, the hard way: NSWorkspace.frontmostApplication() reported
+        'Claude' for an entire run while the agent's keystrokes were reaching
+        WhatsApp — the message was actually sent, twice. Input followed the
+        real keyboard focus; this API reported the app on OUR Space.
+
+        Perception and input disagreeing SILENTLY is the worst failure this
+        system can have (§8.5). So we ask the window server too, and when the
+        two disagree we say so rather than picking a winner: a caller that
+        knows the observation is untrustworthy can refuse to act on it, which
+        is strictly better than one that acts confidently on the wrong screen.
+        """
         app = NSWorkspace.sharedWorkspace().frontmostApplication()
-        if app is None:
-            return "", ""
-        name = str(app.localizedName() or "")
-        bundle = str(app.bundleIdentifier() or "")
-        # WhatsApp and others prefix titles with U+200E LEFT-TO-RIGHT MARK.
-        return name.replace(_LTR_MARK, "").strip(), bundle
+        ns_name = str(app.localizedName() or "") if app else ""
+        ns_bundle = str(app.bundleIdentifier() or "") if app else ""
+        ns_name = ns_name.replace(_LTR_MARK, "").strip()
+
+        win_name = self._frontmost_window_owner()
+        if win_name and ns_name and win_name != ns_name:
+            log.warning(
+                "frontmost.disagreement",
+                nsworkspace=ns_name, window_server=win_name,
+                note="observation may describe a different app than input reaches",
+            )
+        return ns_name, ns_bundle
+
+    def _frontmost_window_owner(self) -> str:
+        """Owner of the front-most normal window, per the window server."""
+        info = Quartz.CGWindowListCopyWindowInfo(
+            Quartz.kCGWindowListOptionOnScreenOnly
+            | Quartz.kCGWindowListExcludeDesktopElements,
+            Quartz.kCGNullWindowID,
+        ) or []
+        for w in info:
+            if w.get("kCGWindowLayer", 1) != 0:
+                continue
+            b = w.get("kCGWindowBounds", {})
+            if b.get("Width", 0) < 200 or b.get("Height", 0) < 120:
+                continue
+            return str(w.get("kCGWindowOwnerName", "")).replace(_LTR_MARK, "").strip()
+        return ""
 
     # -- input -------------------------------------------------------------
     def click(self, x: int, y: int, kind: str = "click") -> None:

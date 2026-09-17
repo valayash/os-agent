@@ -116,9 +116,18 @@ def format_elements(elements: list[Element], limit: int = 80) -> str:
     return "\n".join(rows)
 
 
-def build_user(state: AgentState) -> str:
+def build_user(state: AgentState, screen: tuple[int, int] | None = None) -> str:
     """Everything the planner needs, and nothing it doesn't."""
     parts = [f"GOAL: {state['goal']}"]
+    if screen:
+        # MEASURED A5: without this the model invents a coordinate frame. A run
+        # produced six clicks at y=971 on a 900-point-tall screen — every one
+        # off the bottom edge, every one a silent no-op. The element list
+        # carries no coordinates by design, so `coords` had no reference at all.
+        parts.append(
+            f"SCREEN: {screen[0]}x{screen[1]} points. "
+            f"Any coords MUST be inside that. Prefer element_id; coords are a last resort."
+        )
 
     app = state.get("app") or "unknown"
     parts.append(f"APP:  {app}")

@@ -73,7 +73,17 @@ class Executor:
     # ----------------------------------------------------------------------
     def _point(self, action: Action, elements: list[Element]) -> tuple[int, int]:
         if action.coords is not None:
-            return action.coords
+            x, y = action.coords
+            w, h = self.adapter.screen_size_points()
+            if not (0 <= x < w and 0 <= y < h):
+                # An off-screen click is not an error the agent can learn from
+                # if we execute it: it simply does nothing and reports
+                # no_change, which reads as "that did not work" rather than
+                # "you asked for something impossible". Refuse it by name.
+                raise PolicyViolation(
+                    f"coords ({x},{y}) are outside the {w}x{h} point screen"
+                )
+            return x, y
         if action.element_id is None:
             raise PolicyViolation(f"{action.kind} needs an element_id or coords")
         for el in elements:

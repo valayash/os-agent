@@ -29,6 +29,16 @@ IRREVERSIBLE: set[str] = {
     "empty trash", "move to trash", "discard", "unsend", "block", "report",
 }
 
+# Actions that COMMIT something outward — a message, an email, a form. These
+# have no label to match: pressing Enter in a chat window sends a message, and
+# IRREVERSIBLE only ever checked the target element's name.
+#
+# MEASURED A5: a run sent the same WhatsApp message TWICE, because verification
+# was blind and the agent retried an action that had already succeeded. The
+# guard below exists because "retry when unsure" is correct for a click and
+# catastrophic for a send.
+COMMIT_KEYS: set[frozenset[str]] = {frozenset({"enter"}), frozenset({"return"})}
+
 # Key combinations that destroy things regardless of what the button says.
 DANGEROUS_CHORDS: set[frozenset[str]] = {
     frozenset({"command", "delete"}),      # move to trash (Finder)
@@ -90,7 +100,8 @@ def _target_label(action: Action, elements: list[Element]) -> str:
 
 
 def requires_approval(
-    action: Action, elements: list[Element], *, approval_on: bool = True
+    action: Action, elements: list[Element], *, approval_on: bool = True,
+    repeated: bool = False,
 ) -> str | None:
     """Reason a human must confirm, or None.
 
@@ -112,6 +123,10 @@ def requires_approval(
         chord = frozenset(k.lower() for k in action.keys)
         if chord in DANGEROUS_CHORDS:
             return f"dangerous key chord {'+'.join(sorted(chord))}"
+        if chord in COMMIT_KEYS and repeated:
+            return ("this exact action already ran this session and could not be "
+                    "verified — repeating it may duplicate an outward-facing side "
+                    "effect such as sending a message")
 
     if approval_on:
         return "approval is on (default); --yolo disables it"

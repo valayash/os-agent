@@ -26,18 +26,25 @@ from os_agent.env.desktop_env import DesktopEnv
 from os_agent.llm.litellm_client import LiteLLMClient
 from os_agent.telemetry.log import configure
 from os_agent.telemetry.tracer import CallRecord, Tracer
-from os_agent.telemetry.trajectory import StepRecord, TrajectoryWriter
+from os_agent.telemetry.trajectory import StepRecord, TrajectoryWriter, target_of
 from os_agent.types import Action, Expectation, Observation, PlannedAction, Reflection
 from os_agent.verify.cheap import check
 
 log = structlog.get_logger(__name__)
 
 
-def make_planner(client: LiteLLMClient, tracer: Tracer) -> Planner:
-    """The ONE model call per step. Rebuilt prompt, never appended (§4.2)."""
+def make_planner(client: LiteLLMClient, tracer: Tracer, traj=None, adapter=None) -> Planner:
+    """The ONE model call per step. Rebuilt prompt, never appended (§4.2).
+
+    Also records the step to the trajectory HERE, while the action and the
+    elements it referred to are both in hand. A5 shipped a version that rebuilt
+    the whole trajectory from final state afterwards — every row then carried
+    the same app, outcome and reason, and no action at all, which defeats §4.6
+    and §4.7 entirely. A trajectory has to be written as it happens.
+    """
 
     async def plan(state: AgentState):
-        user = build_user(state)
+        user = build_user(state, screen=adapter.screen_size_points())
         image = base64.b64decode(state.get("screenshot_b64") or "")
         t0 = time.perf_counter()
         try:
@@ -68,6 +75,31 @@ def make_planner(client: LiteLLMClient, tracer: Tracer) -> Planner:
             cost_usd=result.cost_usd, repairs=result.repairs,
             attempts=result.raw.get("attempts", 1), ok=True,
         ))
+
+        if traj is not None:
+            planned = result.parsed
+            els = state.get("elements") or []
+            traj.add(StepRecord(
+                step=state["step"],
+                app=state.get("app", ""), bundle_id=state.get("bundle_id", ""),
+                subgoal=planned.subgoal, reasoning=planned.reasoning,
+                action=planned.action.__dict__.copy(),
+                # §4.7 — the stable key, so this step survives id renumbering
+                action_target=target_of(planned.action, els),
+                expect=planned.expect.model_dump(),
+                # the outcome of the PREVIOUS step; this one has not run yet
+                outcome=state.get("last_outcome", ""),
+                reason=state.get("last_reason", ""),
+                elements=len(els),
+                perception_ms=state.get("perception_ms", 0.0),
+                llm_latency_ms=result.latency_ms,
+                provider_wait_ms=result.provider_wait_ms,
+                prompt_tokens=result.prompt_tokens,
+                completion_tokens=result.completion_tokens,
+                cost_usd=result.cost_usd, repairs=result.repairs,
+                facts=list(state.get("facts") or []),
+                reflection_note=state.get("reflection_note", ""),
+            ))
         return result
 
     return plan
@@ -140,14 +172,26 @@ async def run_task(goal: str, task_id: str, *, yolo: bool, max_steps: int | None
     configure(pretty=True)
     tracer = Tracer()
     client = LiteLLMClient(settings.planner)
+    traj = TrajectoryWriter(task_id, goal, client.model, client.provider)
+    adapter = MacOSAdapter()
     env = DesktopEnv(
-        MacOSAdapter(), mode="bench" if task_id != "freeform" else "freeform",
-        approve=None if yolo else approve_at_terminal,
-        approval_on=not yolo,
+        adapter, mode="bench" if task_id != "freeform" else "freeform",
+        # MEASURED A5: a terminal approval prompt BREAKS focus-dependent
+        # automation. Typing "y" makes the terminal frontmost, so the approved
+        # action then fires at the terminal instead of the target app — every
+        # step returns no_change and the agent looks broken when it is not.
+        # §5.3 again, from an angle we did not anticipate.
+        #
+        # The callback is still passed even when approval is off: policy flags
+        # irreversible targets and dangerous chords regardless of the setting
+        # (§8.6), and without a callback those would raise and kill the run.
+        # Routine actions run silently; destructive ones still stop and ask.
+        approve=approve_at_terminal,
+        approval_on=settings.approval and not yolo,
     )
     app = build_graph(
         env,
-        make_planner(client, tracer),
+        make_planner(client, tracer, traj, adapter),
         make_verifier(),
         make_reflector(client, tracer),
         approval=False,
@@ -184,22 +228,7 @@ async def run_task(goal: str, task_id: str, *, yolo: bool, max_steps: int | None
     print(f"  schema repairs  : {summary['schema_repair_rate']:.2f}/call")
     print(f"  reflections     : {final['reflections']}")
 
-    # Every run goes to disk (§4.6). Phase B trains on these.
-    traj = TrajectoryWriter(task_id, goal, client.model, client.provider)
-    for i, rec in enumerate(tracer.records):
-        traj.add(StepRecord(
-            step=i, app=final.get("app", ""), bundle_id=final.get("bundle_id", ""),
-            subgoal=final.get("subgoal", ""), reasoning=final.get("reasoning", ""),
-            action=None, action_target=None, expect=None,
-            outcome=final.get("last_outcome", ""), reason=final.get("last_reason", ""),
-            elements=len(final.get("elements") or []),
-            perception_ms=final.get("perception_ms", 0.0),
-            llm_latency_ms=rec.latency_ms, provider_wait_ms=rec.provider_wait_ms,
-            prompt_tokens=rec.prompt_tokens, completion_tokens=rec.completion_tokens,
-            cost_usd=rec.cost_usd, repairs=rec.repairs,
-            facts=list(final.get("facts") or []),
-            reflection_note=final.get("reflection_note", ""),
-        ))
+    # Steps were recorded as they happened (see make_planner). Just close it.
     path = traj.close({
         "success": score == 1.0 if score is not None else None,
         "terminal_reason": terminal_reason(final),

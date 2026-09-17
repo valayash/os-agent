@@ -1347,6 +1347,27 @@ A plumbing note, because the lever was unreachable without it: `LiteLLMClient._c
 always built an image block, so an empty image was sent as an empty data URI and rejected
 with a 400. Text-only mode was impossible to even try because of four lines of plumbing.
 
+### MEASURED A5 — prompt caching is NOT happening, and cannot yet
+
+`prompts.py` splits a byte-identical SYSTEM from a volatile user message
+specifically so a provider can cache the prefix (§8.1). Verified for the first
+time; it does nothing:
+
+    call   latency   prompt   cached
+    1       2597ms      469        0
+    4       1737ms      469        0
+
+**Zero cached tokens, every call.** The whole prompt is 469 tokens — below the
+minimum cacheable prefix providers require (typically 1,024–4,096). The design
+is right and the benefit is uncollectable at this size.
+
+**This inverts the cost of RAG.** App-knowledge tables and few-shot examples both
+belong in the stable prefix (§18 layering). Adding ~600 tokens there would cross
+the caching threshold, so their MARGINAL cost is lower than the token count
+suggests — and the prefix-caching row is worth zero until RAG exists to make the
+prefix big enough to cache. Two levers that only pay together, like adaptive
+settle and action grouping.
+
 ### MEASURED — image encoding. base64 is not a choice; bytes are.
 
 base64 IS the wire format for these APIs — HTTP JSON cannot carry binary, so it is
