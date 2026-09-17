@@ -17,7 +17,7 @@ from os_agent.actions.policy import (
     commits_outward,
 )
 from os_agent.desktop.base import DesktopAdapter
-from os_agent.env.base import ApprovalDenied, PolicyViolation
+from os_agent.env.base import ActionError, ApprovalDenied, PolicyViolation
 from os_agent.types import Action, Element
 
 log = structlog.get_logger(__name__)
@@ -73,7 +73,10 @@ class Executor:
                 repeated=fingerprint in self._executed,
             )
             if not verdict.allowed:
-                log.warning("policy.refused", kind=action.kind, reason=verdict.reason)
+                log.warning("policy.refused", kind=action.kind, reason=verdict.reason,
+                            recoverable=verdict.recoverable)
+                if verdict.recoverable:
+                    raise ActionError(verdict.reason)
                 raise PolicyViolation(verdict.reason)
 
             if verdict.needs_approval:
@@ -93,7 +96,25 @@ class Executor:
                 self._commits += 1
                 log.warning("act.commit", n=self._commits, kind=action.kind, why=commit)
 
-            self._dispatch(action, elements)
+            # THE ADAPTER IS ALLOWED TO BE SURPRISING; the run is not allowed
+            # to die of it. press_keys(["cmd"]) raises ValueError ("needs
+            # exactly one non-modifier key"), press_keys(["f5"]) raises
+            # ValueError ("no macOS keycode"), and pyautogui can raise
+            # anything at all. None of those were caught anywhere: the
+            # traceback escaped ainvoke, so the run ended with no summary, no
+            # trajectory and no record of what it had already done.
+            #
+            # A malformed action is the planner's mistake to correct, so it
+            # arrives as one more `outcome=error` with the reason attached.
+            try:
+                self._dispatch(action, elements)
+            except (ActionError, PolicyViolation, ApprovalDenied):
+                raise
+            except Exception as exc:  # noqa: BLE001
+                log.warning("act.failed", kind=action.kind,
+                            error=f"{type(exc).__name__}: {exc}"[:160])
+                raise ActionError(f"{action.kind} failed: {type(exc).__name__}: {exc}") from exc
+
             self._executed.add(fingerprint)
             time.sleep(SETTLE_S)
 
@@ -113,16 +134,18 @@ class Executor:
                 # if we execute it: it simply does nothing and reports
                 # no_change, which reads as "that did not work" rather than
                 # "you asked for something impossible". Refuse it by name.
-                raise PolicyViolation(
+                raise ActionError(
                     f"coords ({x},{y}) are outside the {w}x{h} point screen"
                 )
             return x, y
         if action.element_id is None:
-            raise PolicyViolation(f"{action.kind} needs an element_id or coords")
+            raise ActionError(f"{action.kind} needs an element_id or coords")
         for el in elements:
             if el.id == action.element_id:
                 return el.center
-        raise PolicyViolation(
+        # Ids renumber on every observation, so this is the planner using a
+        # number it read one screen ago. Ordinary, and entirely recoverable.
+        raise ActionError(
             f"element_id {action.element_id} is not on screen "
             f"(ids present: {[e.id for e in elements][:20]})"
         )
@@ -135,7 +158,7 @@ class Executor:
             self.adapter.click(x, y, kind=k)
         elif k == "type":
             if action.text is None:
-                raise PolicyViolation("type action with no text")
+                raise ActionError("type action with no text")
             # ONE ACTION KIND, ONE EFFECT.
             #
             # A newline inside typed text is an invisible Enter. It commits in
@@ -147,7 +170,7 @@ class Executor:
             # This is the difference between a guardrail and a guardrail that
             # can be walked around without noticing.
             if "\n" in action.text or "\r" in action.text:
-                raise PolicyViolation(
+                raise ActionError(
                     "typed text contains a newline, which would send/commit "
                     "silently. Type the text, then emit a separate "
                     "{'kind': 'key', 'keys': ['enter']} action to commit it."
@@ -156,7 +179,7 @@ class Executor:
             self.adapter.type_text(action.text)
         elif k == "key":
             if not action.keys:
-                raise PolicyViolation("key action with no keys")
+                raise ActionError("key action with no keys")
             log.info("act.key", keys=action.keys)
             self.adapter.press_keys(action.keys)
         elif k == "scroll":
@@ -165,4 +188,4 @@ class Executor:
         elif k == "wait":
             time.sleep((action.amount or 1000) / 1000)
         else:
-            raise PolicyViolation(f"executor has no handler for action kind {k!r}")
+            raise ActionError(f"executor has no handler for action kind {k!r}")

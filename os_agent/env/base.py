@@ -45,3 +45,27 @@ class PolicyViolation(RuntimeError):
 
 class ApprovalDenied(RuntimeError):
     """A human said no at the approval prompt."""
+
+
+class ActionError(RuntimeError):
+    """The action could not be performed, but the agent may try something else.
+
+    THE DISTINCTION FROM PolicyViolation IS THE WHOLE POINT, and getting it
+    wrong cost real runs. Both used to raise PolicyViolation, and `execute`
+    ends the run on one of those. So a stale element_id — the single most
+    ordinary mistake a planner makes, because ids renumber on EVERY
+    observation — killed the entire run instead of being retried.
+
+        PolicyViolation   the guardrails said NEVER.        End the run.
+                          (app not in allowlist, human declined)
+
+        ActionError       this particular attempt cannot run. The planner
+                          can fix it itself, given the reason.
+                          (stale id, off-screen coords, newline in `type`,
+                           an unhandled action kind, a bad key name)
+
+    An ActionError becomes `outcome=error` with its message as the reason, so
+    it flows to the planner through the normal channel and counts toward
+    consecutive_failures like any other failure. Two in a row still triggers
+    reflection; it is recovery, not a free pass.
+    """

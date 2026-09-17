@@ -76,6 +76,9 @@ class Verdict:
     allowed: bool
     needs_approval: bool = False
     reason: str = ""
+    # A refusal the PLANNER can fix by choosing differently, as opposed to one
+    # the guardrails will never permit. Only the second kind ends a run.
+    recoverable: bool = False
 
     def __bool__(self) -> bool:  # `if policy.check(...):`
         return self.allowed
@@ -202,7 +205,9 @@ def check(
         )
 
     if action.kind == "click" and action.element_id is None and action.coords is None:
-        return Verdict(False, reason="click with neither element_id nor coords")
+        # Malformed output, not a forbidden act. Tell the planner and move on.
+        return Verdict(False, recoverable=True,
+                       reason="click with neither element_id nor coords")
 
     on = settings.approval if approval_on is None else approval_on
     if reason := requires_approval(action, elements, approval_on=on, repeated=repeated):

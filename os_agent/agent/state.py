@@ -58,6 +58,9 @@ class AgentState(TypedDict, total=False):
     last_action: Action | None
     last_expect: Expectation | None
     last_outcome: str  # success | no_change | error | ambiguous
+    # Set by execute when the action could not run (stale id, bad key, ...).
+    # Read by verify, then cleared. A scalar, so it cannot accumulate (§4.2).
+    executor_error: str
     last_reason: str  # the one-line why, e.g. "'Save' did not appear"
 
     # -- compressed memory. ENTERS THE PROMPT, so hard-capped at 10. --------
@@ -106,6 +109,7 @@ def initial_state(goal: str, task_id: str = "freeform") -> AgentState:
         last_action=None,
         last_expect=None,
         last_outcome="",
+        executor_error="",
         last_reason="",
         facts=[],
         reflection_note="",

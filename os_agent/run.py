@@ -150,6 +150,11 @@ def make_verifier() -> Verifier:
             after_elements=after.elements,
             before_png=before_png,
             after_png=after.screenshot,
+            # check() has had this parameter since A4 and nothing ever passed
+            # it. It short-circuits to ("error", reason), which is exactly
+            # what a failed action needs — the expectation is meaningless when
+            # the action never ran.
+            executor_error=state.get("executor_error") or None,
         )
 
     return verify

@@ -25,7 +25,12 @@ from os_agent.agent.state import (
     push_fact,
     push_hash,
 )
-from os_agent.env.base import ApprovalDenied, Environment, PolicyViolation
+from os_agent.env.base import (
+    ActionError,
+    ApprovalDenied,
+    Environment,
+    PolicyViolation,
+)
 from os_agent.llm.base import LLMResult
 from os_agent.types import Action, Expectation, Observation, PlannedAction
 
@@ -119,13 +124,25 @@ def make_nodes(
             return {}
         try:
             await env.act([action])  # a LIST, always (§4.1)
-            return {}
+            return {"executor_error": ""}
         except (PolicyViolation, ApprovalDenied) as exc:
             # A refusal is not a failed attempt — it is the guardrails working.
             # It ends the run rather than being retried (§8.6).
             log.warning("execute.refused", step=state["step"], error=str(exc)[:120])
             return {"status": "failed", "terminal_reason": "policy",
                     "last_outcome": "error"}
+        except ActionError as exc:
+            # The OTHER kind of failure: this attempt could not run, but the
+            # planner can choose differently next step. It must NOT end the
+            # run — a stale element_id used to do exactly that, and ids
+            # renumber on every observation.
+            #
+            # It is handed to verify rather than returned as an outcome here,
+            # so it flows through the one place that decides outcomes and
+            # counts toward consecutive_failures like any other failure.
+            log.warning("execute.action_error", step=state["step"],
+                        error=str(exc)[:160])
+            return {"executor_error": str(exc)[:200]}
 
     async def verify(state: AgentState) -> AgentState:
         """Check the expectation the planner already emitted. NO model call.
@@ -169,6 +186,7 @@ def make_nodes(
             "screenshot_plain_b64": base64.b64encode(obs.screenshot).decode(),
             "screen_hash": obs.meta.get("screen_hash", ""),
             "obs_fresh": True,
+            "executor_error": "",  # consumed; never carried into the next step
         }
 
     async def reflect(state: AgentState) -> AgentState:

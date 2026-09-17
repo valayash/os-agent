@@ -104,8 +104,9 @@ def test_repeated_commit_needs_a_human_even_with_yolo():
 
 
 def test_executor_refuses_a_newline_inside_type():
+    """RECOVERABLE, not terminal: the planner can split it into type + enter."""
     from os_agent.actions.executor import Executor
-    from os_agent.env.base import PolicyViolation
+    from os_agent.env.base import ActionError
 
     class _Adapter:
         def frontmost_app(self): return ("Test", "com.test")
@@ -113,7 +114,7 @@ def test_executor_refuses_a_newline_inside_type():
         def type_text(self, text): raise AssertionError("must never be reached")
 
     ex = Executor(_Adapter(), approve=lambda *_: True, approval_on=False)
-    with pytest.raises(PolicyViolation, match="newline"):
+    with pytest.raises(ActionError, match="newline"):
         ex.run([Action(kind="type", text="hello\n")], [],
                mode="freeform", allowed_bundles=None)
 
