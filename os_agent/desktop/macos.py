@@ -20,7 +20,9 @@ from AppKit import NSScreen, NSWorkspace
 from ApplicationServices import (
     AXUIElementCopyAttributeValue,
     AXUIElementCreateApplication,
+    AXUIElementSetAttributeValue,
     AXUIElementSetMessagingTimeout,
+    AXValueCreate,
     AXValueGetValue,
     kAXValueCGPointType,
     kAXValueCGSizeType,
@@ -328,6 +330,82 @@ class MacOSAdapter:
     def wait(self, seconds: float) -> None:
         time.sleep(seconds)
 
+    # -- window management (PREFLIGHT ONLY, never in the action space) ------
+    #
+    # CLAUDE.md §5.3: focus cannot be taken programmatically during unattended
+    # automation, so app switching is NOT an agent action. But the human is at
+    # the keyboard at the moment they press Enter on the CLI, and that is
+    # exactly the window in which macOS still honours an activation request.
+    # So we spend it once, before the loop starts, and then VERIFY.
+    #
+    # §13: and while we are here, fit the window to the screen. A default-size
+    # TextEdit window captured 2,393 KB because ~97% of the frame was desktop
+    # wallpaper; maximised it was 86 KB. 28x, free, every single step.
+
+    def activate_app(self, name: str, *, timeout_s: float = 6.0) -> bool:
+        """Bring `name` forward and CONFIRM it arrived. Never trust the return
+        code of an activation call on macOS — every mechanism in §5.3's table
+        returned success while doing nothing."""
+        target = name.strip().lower()
+        running = None
+        for app in NSWorkspace.sharedWorkspace().runningApplications():
+            label = str(app.localizedName() or "").replace(_LTR_MARK, "").strip()
+            if label.lower() == target:
+                running = app
+                break
+
+        if running is not None:
+            running.activateWithOptions_(1 << 1)  # ActivateIgnoringOtherApps
+        else:
+            # Not running: launch it. `open -a` also carries the activation.
+            subprocess.run(["open", "-a", name], capture_output=True)
+
+        deadline = time.time() + timeout_s
+        while time.time() < deadline:
+            front, _ = self.frontmost_app()
+            if front.strip().lower() == target:
+                return True
+            time.sleep(0.25)
+        return False
+
+    def fit_frontmost_window(self) -> bool:
+        """Resize the front window to fill the visible screen area.
+
+        MAXIMISE, NEVER FULLSCREEN (§13). The green button gives the app its
+        own Space, and a separate Space is the §5.3 wall: every other window
+        becomes unrenderable and the agent goes blind. Setting the frame keeps
+        one Space and gets all of the benefit.
+        """
+        pid = self._frontmost_window_pid()
+        if pid is None:
+            return False
+        ref = AXUIElementCreateApplication(pid)
+        AXUIElementSetMessagingTimeout(ref, _AX_TIMEOUT_S)
+        err, windows = AXUIElementCopyAttributeValue(ref, "AXWindows", None)
+        if err != 0 or not windows:
+            return False
+        window = windows[0]
+
+        # visibleFrame excludes the menu bar and the Dock, wherever the Dock
+        # is. AppKit's origin is BOTTOM-left; AX wants TOP-left, so the y flip
+        # is not optional — get it wrong and the window lands under the Dock.
+        screen = NSScreen.mainScreen()
+        full, vis = screen.frame(), screen.visibleFrame()
+        top_inset = full.size.height - (vis.origin.y + vis.size.height)
+
+        pos = AXValueCreate(kAXValueCGPointType,
+                            Quartz.CGPoint(vis.origin.x, top_inset))
+        size = AXValueCreate(kAXValueCGSizeType,
+                             Quartz.CGSize(vis.size.width, vis.size.height))
+        # Position first, then size: a window pinned at the old origin can be
+        # clamped by the screen edge and silently come back smaller.
+        e1 = AXUIElementSetAttributeValue(window, "AXPosition", pos)
+        e2 = AXUIElementSetAttributeValue(window, "AXSize", size)
+        ok = e1 == 0 and e2 == 0
+        log.info("window.fit", ok=ok, pos_err=e1, size_err=e2,
+                 w=int(vis.size.width), h=int(vis.size.height))
+        return ok
+
     # -- perception (A2) ---------------------------------------------------
     def raw_tree(self) -> list[RawNode]:
         """Walk the focused window of the frontmost app into flat RawNodes.
@@ -342,10 +420,17 @@ class MacOSAdapter:
           3. prune zero-size / offscreen subtrees BEFORE descending
           4. 0.5s messaging timeout so one hung app cannot stall a step
         """
-        app = NSWorkspace.sharedWorkspace().frontmostApplication()
-        if app is None:
-            return []
-        ref = AXUIElementCreateApplication(app.processIdentifier())
+        # The window server, NOT NSWorkspace. Fixing frontmost_app() alone was
+        # not enough: this walk had its own copy of the same broken call, so
+        # perception kept reading the spawning app's tree while the reporter
+        # said the right thing. Two call sites, one truth — keep them together.
+        pid = self._frontmost_window_pid()
+        if pid is None:
+            app = NSWorkspace.sharedWorkspace().frontmostApplication()
+            if app is None:
+                return []
+            pid = app.processIdentifier()
+        ref = AXUIElementCreateApplication(pid)
         AXUIElementSetMessagingTimeout(ref, _AX_TIMEOUT_S)
 
         out: list[RawNode] = []

@@ -168,12 +168,36 @@ def approve_at_terminal(action: Action, verdict) -> bool:
         return False
 
 
-async def run_task(goal: str, task_id: str, *, yolo: bool, max_steps: int | None = None):
+async def run_task(goal: str, task_id: str, *, yolo: bool, max_steps: int | None = None,
+                   app_name: str | None = None):
     configure(pretty=True)
     tracer = Tracer()
     client = LiteLLMClient(settings.planner)
     traj = TrajectoryWriter(task_id, goal, client.model, client.provider)
     adapter = MacOSAdapter()
+
+    # -- PREFLIGHT (§5.3, §13) ---------------------------------------------
+    # Switching apps is not in the agent's action space and cannot be: macOS
+    # suppresses programmatic focus changes for a background process. The one
+    # moment it does NOT suppress them is right after real human input — which
+    # is now, because a person just pressed Enter on this command.
+    #
+    # So the run owns app focus, the agent never touches it, and we verify
+    # rather than assume. A run that starts pointed at the wrong app produces
+    # a plausible-looking trajectory of entirely meaningless steps; that is
+    # strictly worse than not starting.
+    if app_name:
+        if not adapter.activate_app(app_name):
+            front, bundle = adapter.frontmost_app()
+            log.error("preflight.focus_failed", want=app_name, got=front, bundle=bundle)
+            print(f"\n  ABORT: could not bring {app_name!r} to the front "
+                  f"(frontmost is {front!r}).\n"
+                  f"  Click the app once yourself, then re-run. §5.3.\n")
+            raise SystemExit(2)
+        adapter.fit_frontmost_window()
+        time.sleep(0.4)  # let the resize settle before the first capture
+        front, bundle = adapter.frontmost_app()
+        log.info("preflight.ok", app=front, bundle=bundle)
     env = DesktopEnv(
         adapter, mode="bench" if task_id != "freeform" else "freeform",
         # MEASURED A5: a terminal approval prompt BREAKS focus-dependent
@@ -248,13 +272,18 @@ def main() -> int:
     ap.add_argument("--yolo", action="store_true",
                     help="skip approval prompts. NEVER unattended (§11).")
     ap.add_argument("--max-steps", type=int, default=None)
+    ap.add_argument("--app", default=None,
+                    help="app to focus and fit to screen BEFORE the run (§5.3). "
+                         "The agent cannot switch apps; this is how it gets pointed.")
     a = ap.parse_args()
 
     if a.task:
         from os_agent.bench import tasks
         goal = tasks.get(a.task).goal
-        return asyncio.run(run_task(goal, a.task, yolo=a.yolo, max_steps=a.max_steps))[1] != 1.0
-    asyncio.run(run_task(a.freeform, "freeform", yolo=a.yolo, max_steps=a.max_steps))
+        return asyncio.run(run_task(goal, a.task, yolo=a.yolo, max_steps=a.max_steps,
+                                    app_name=a.app))[1] != 1.0
+    asyncio.run(run_task(a.freeform, "freeform", yolo=a.yolo, max_steps=a.max_steps,
+                         app_name=a.app))
     return 0
 
 
