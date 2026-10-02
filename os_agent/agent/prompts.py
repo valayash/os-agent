@@ -11,7 +11,7 @@ or a step counter in the system half and the cache is dead forever (§8.1).
 """
 
 from os_agent.agent.state import FACTS_CAP, AgentState
-from os_agent.types import Element
+from os_agent.types import Element, MenuCommand
 
 # ---------------------------------------------------------------------------
 # STATIC. Byte-identical on every call, for the life of the run.
@@ -35,6 +35,7 @@ RULES
   Prefer element_id over coords. Use coords only when nothing in the list fits.
   Menus work in two steps: click the menu, then the item appears next turn.
   If the goal is already satisfied by what you can see, emit done immediately.
+  An element showing operations in braces, e.g. {press,type}, supports only those.
 
   SENDING IS A SEPARATE ACTION, ALWAYS. `type` writes text and nothing else; a
   newline inside it is refused. To send, follow it with key ["enter"].
@@ -54,6 +55,49 @@ model call. Predict the CHEAPEST observable consequence:
 FACTS — new_fact records ONE durable discovery, or null. A fact is a property of
 the world ("the file is at ~/notes.txt", "Save As is cmd+shift+s here"). It is
 never a narration of what you just did ("clicked the File menu")."""
+
+
+# ---------------------------------------------------------------------------
+# Mode addenda (CLAUDE.md §4.11). Chosen ONCE per run from config, so the
+# system prompt is still byte-identical on every call of that run.
+# ---------------------------------------------------------------------------
+AX_ADDENDUM = """
+
+ACCESSIBILITY EXECUTION is on. Actions go straight to the app, not through the mouse.
+  click      on an element with {press} presses it directly
+  set_value  needs element_id + text. REPLACES the element's whole contents —
+             to append, include the existing text. Only on elements with {type}.
+             A filename field is a rename: avoid set_value in file lists."""
+
+MENU_ADDENDUM = """
+
+MENU COMMANDS are listed as [mN] under MENU. Invoke one in a single step with
+  menu       element_id = N  (the number after m)
+This is cheaper than clicking a menu open and then clicking the item."""
+
+FANOUT_ADDENDUM = """
+
+REPLY SHAPE: choose `operation`, then fill the head that operation uses —
+click_target, type_value (+ set_target for set_value), menu_target, keys,
+scroll_target + amount. Fill other heads too if you know what they would be.
+risk: high if the action deletes, sends, overwrites or cannot be undone."""
+
+
+def system_prompt(*, exec_mode: str = "synthetic", menu_actions: bool = False,
+                  plan_schema: str = "single") -> str:
+    """SYSTEM plus the addenda this run's configuration needs.
+
+    With the defaults it returns SYSTEM unchanged, so the baseline prompt is
+    the baseline prompt.
+    """
+    out = SYSTEM
+    if exec_mode == "ax":
+        out += AX_ADDENDUM
+    if menu_actions:
+        out += MENU_ADDENDUM
+    if plan_schema == "fanout":
+        out += FANOUT_ADDENDUM
+    return out
 
 
 REFLECT_SYSTEM = """You are debugging a stuck computer-use agent.
@@ -116,11 +160,16 @@ def format_elements(elements: list[Element], limit: int = 80) -> str:
         return "(no interactive elements detected — the app may expose no accessibility tree)"
     rows = [
         f"[{e.id:>2}] {e.role:<11} {e.name[:52]!r}"
+        + (f" {{{','.join(e.ops)}}}" if e.ops else "")
         for e in elements[:limit]
     ]
     if len(elements) > limit:
         rows.append(f"... {len(elements) - limit} more not shown")
     return "\n".join(rows)
+
+
+def format_menu(menu: list[MenuCommand]) -> str:
+    return "\n".join(f"[m{m.id}] {m.title}" for m in menu)
 
 
 def build_user(state: AgentState, screen: tuple[int, int] | None = None) -> str:
@@ -170,6 +219,8 @@ def build_user(state: AgentState, screen: tuple[int, int] | None = None) -> str:
     parts.append(f"(facts are capped at {FACTS_CAP}; the oldest is dropped)")
 
     parts.append(f"\nELEMENTS\n{format_elements(state.get('elements') or [])}")
+    if menu := state.get("menu"):
+        parts.append(f"\nMENU\n{format_menu(menu)}")
     parts.append(f"\nSTEP {state['step'] + 1}. Choose one action.")
     return "\n".join(parts)
 

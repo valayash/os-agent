@@ -126,6 +126,15 @@ Free now, expensive later. Make them from the first commit.
 8. **Model names come from config, never hardcoded.** We test 4–5 models.
 9. **The model call goes through `LLMClient`, never a provider SDK directly.** LiteLLM is the default implementation; `extra: dict` passes provider-specific knobs straight through. Swapping providers is one env var.
 10. **Perception is platform-neutral.** The adapter returns *raw* nodes; filtering, dedup and reading-order numbering live in `perception/elements.py`. A future Windows adapter writes a tree walk, not a second perception stack.
+11. **The benchmark is synthetic input. AX execution is a separate, labelled ablation row.**
+    Pressing via `AXPress` and writing via `AXValue` is arguably application integration,
+    which §18 walls off from the benchmark. So: `EXEC_MODE=synthetic` (default) is the
+    headline number — real mouse and keyboard events, computer use as defined in §1.
+    `EXEC_MODE=ax` is its own row, recorded in every trajectory's `meta.json`, never
+    averaged into the baseline and never compared against screen-driving agents. If the
+    project ever adopts AX execution as the thesis ("drive native apps through the
+    accessibility layer, pixels as fallback"), that is a README-level redefinition, not a
+    config change. Blurring the two is the one indefensible option. See §19.
 
 ---
 
@@ -182,6 +191,17 @@ and `Observation.meta["scale"]` records it per observation. Nothing hardcodes 2.
 A unit test asserts screenshot size equals the screen's point dimensions. If it fails, stop.
 
 ### 5.3 Focus cannot be taken programmatically — MEASURED A2
+
+> **Scope, added with §19:** everything below was measured on mechanisms that bring an
+> app TO THE FRONT, or that travel through the window server (real clicks, synthetic
+> keystrokes, screenshots). It proves **activation** is blocked. It does not test
+> **action** sent straight to a process: `AXPress` / `AXValue` need no window server, no
+> cursor and no focus, so macOS may have no reason to block them — the reference repo
+> reports `took_focus == False` on every Calculator run. **UNVERIFIED HERE.**
+> `scripts/ax_background.py` is the test; until it passes on this machine, the
+> conclusions below stand for both paths. Still blocked regardless: anything through the
+> window server, screenshots of another Space, and menu commands of an INACTIVE app
+> (it reports every item disabled).
 
 macOS permits a background process to bring an application forward only shortly after real
 human input. During a long unattended automation run it suppresses focus changes, and
@@ -267,6 +287,11 @@ apps that stay put, and then it is a single command.
 "copy these figures into that email" — both windows never need to be visible at once.
 `cmd+c`, switch, `cmd+v`. That turns a multi-window problem into a sequence of
 single-window steps, which the agent already handles, and it is how a person does it.
+
+**Possibly unblocked by §19.** If `scripts/ax_background.py` shows AX action needs no
+focus, switching windows stops gating multi-window on the AX path — act on the window by
+pid, no raise required. Re-open this section after it has run. The synthetic path is
+unaffected either way.
 
 **Phase A stays single-window, and all 15 tasks must be single-window.** Multi-window is a
 separate capability with its own failure modes (which window does element 7 belong to?
@@ -358,7 +383,9 @@ os-agent/
 │
 ├── scripts/                    # gate checks + diagnostics; never imported by os_agent/
 │   ├── a0_gate.py
-│   └── a1_gate.py
+│   ├── a1_gate.py
+│   ├── ax_depth.py             # §19 step 1: depth 20 vs 60, per app
+│   └── ax_background.py        # §19 step 5: does AX action need focus?
 │
 ├── tasks/
 │   ├── fixtures/               # seed files copied into the sandbox by setup()
@@ -381,8 +408,18 @@ from typing import Literal
 ActionKind = Literal[
     "click", "double_click", "right_click",
     "type", "key", "scroll", "drag",
+    "set_value", "menu",                      # EXEC_MODE=ax only (§4.11, §19)
     "wait", "done", "fail",
 ]
+Risk = Literal["low", "medium", "high"]
+
+@dataclass
+class RawNode:                                # adapter output, platform vocabulary
+    role: str; name: str; bbox: tuple | None
+    enabled: bool = True; focused: bool = False; depth: int = 0
+    actions: tuple[str, ...] = ()             # e.g. ("AXPress",)   — §19 step 2
+    value_settable: bool = False
+    path: str = ""                            # opaque handle, resolved by the SAME adapter
 
 @dataclass
 class Element:
@@ -391,6 +428,13 @@ class Element:
     name: str                                 # accessible name / visible label
     bbox: tuple[int, int, int, int]           # x0, y0, x1, y1 — POINTS
     enabled: bool = True
+    ops: tuple[str, ...] = ()                 # "press" | "type" | "menu"; () = unknown
+    path: str = ""                            # carried through, never parsed
+
+@dataclass
+class MenuCommand:                            # MENU_ACTIONS=on — shown as [mN]
+    id: int; title: str; path: str            # title = "Format > Make Rich Text"
+    enabled: bool = True
 
 @dataclass
 class Observation:
@@ -398,15 +442,26 @@ class Observation:
     annotated: bytes                          # PNG with SoM overlay
     elements: list[Element]
     meta: dict = field(default_factory=dict)  # app, bundle_id, window title, scale
+    menu: list[MenuCommand] = field(default_factory=list)
+
+@dataclass
+class Receipt:                                # what an AX operation can honestly claim
+    mechanism: str                            # ax_press | ax_set_value | ax_menu | keys_fallback
+    dispatched: bool                          # sent. timed_out => it MAY have run: stop
+    timed_out: bool = False
+    window_changed: bool | None = None        # something moved — NOT success
+    verified: bool | None = None              # read-back agrees (set_value)
+    detail: str = ""
 
 @dataclass
 class Action:
     kind: ActionKind
-    element_id: int | None = None
+    element_id: int | None = None             # for kind="menu": the N of [mN]
     text: str | None = None
     keys: list[str] | None = None
     amount: int | None = None                 # scroll
     coords: tuple[int, int] | None = None     # escape hatch — POINTS
+    risk: Risk | None = None                  # planner's rating; gates approval (§8.6)
 ```
 
 ```python
@@ -424,6 +479,14 @@ class PlannedAction(BaseModel):
     expect: Expectation                       # verification without an LLM
     confidence: float                         # Phase B
     new_fact: str | None = None               # at most ONE per step
+
+class FanOutPlan(BaseModel):                  # PLAN_SCHEMA=fanout — §19 step 6
+    operation: Literal["click", "type", "set_value", "menu",
+                       "key", "scroll", "wait", "done", "fail"]
+    click_target / type_value / set_target / menu_target / keys / scroll_target / amount
+    risk: Risk = "low"                        # no extra round trip for a safety rating
+    reasoning, subgoal, expect, confidence, new_fact     # as PlannedAction
+    def to_planned(self) -> PlannedAction     # only the matching head executes
 ```
 
 ```python
@@ -489,6 +552,16 @@ class DesktopAdapter(Protocol):
     def press_keys(self, keys: list[str]) -> None: ...
     def scroll(self, x: int, y: int, amount: int) -> None: ...
     def ocr(self, image_png: bytes, bbox: tuple[int, int, int, int]) -> str: ...
+
+    # AX execution path (EXEC_MODE=ax, §19). Straight to the target process.
+    # The executor GUARDS every call: read_node(path) first, refuse unless role and
+    # name still match what the planner saw (handles go stale like ids do, §4.7).
+    def read_node(self, path: str) -> RawNode | None: ...
+    def read_value(self, path: str) -> str | None: ...
+    def press(self, path: str) -> Receipt: ...
+    def set_value(self, path: str, text: str) -> Receipt: ...   # write, then READ BACK
+    def menu_tree(self) -> list[RawNode]: ...                   # name = "Format > Bold"
+    def invoke_menu(self, path: str) -> Receipt: ...            # menu stays CLOSED
 ```
 
 ```python
@@ -502,6 +575,7 @@ class AgentState(TypedDict):
     elements: list[Element]
     screenshot_b64: str
     obs_fresh: bool                # verify captures; observe becomes a no-op
+    menu: list[MenuCommand]        # MENU_ACTIONS=on only; capped at MENU_CAP=80
 
     subgoal: str
     last_action: Action | None
@@ -573,7 +647,7 @@ UI text, zero non-Python dependencies. The single biggest "because we're on a Ma
 mitigations are part of the design, not optimizations:
 
 1. Frontmost app's focused window only — never the whole desktop
-2. Depth cap 20, node cap 300
+2. Depth cap **60** (`AX_MAX_DEPTH`; was 20 at A2 — see below), node cap 300
 3. Prune zero-size and offscreen subtrees *before* descending
 4. `AXUIElementSetMessagingTimeout(0.5)` so one hung app cannot stall a step
 
@@ -594,6 +668,24 @@ Finder do not exist on Windows.
 **Known weakness (all platforms):** Electron, canvas and some Java apps expose almost
 nothing — confirmed at A0, where Claude Desktop returned 8 nodes, all `AXGroup`/`AXWindow`,
 with nothing actionable.
+
+> **Probably our depth cap, not Electron.** The reference repo (§19) made the same claim
+> and then found it false: Chromium puts the web area ~9 levels under the window and the
+> interface another 10–20 below that. Feishu went from 2 characters at depth 18 to 2,431
+> (and a composer) at depth 40; Lark to 3,399 characters and 174 actionable elements.
+> Cost there: ~100 ms per snapshot on apps that need it (Lark 34→169 ms), nothing on apps
+> that do not (Calculator and Finder identical at 18 and 60). **Our cap was 20.** Raised to
+> 60 with the node cap kept; `scripts/ax_depth.py` records old vs new for every app and the
+> result goes in §8.4 with BOTH columns. Until it has run, the A0 finding above is
+> unexplained rather than refuted. What survives as genuinely sparse is likely a much
+> smaller class (they cite Linear: three elements, no text, at any depth).
+
+**Capabilities are read during the walk (§19 step 2).** For every non-container node:
+`AXUIElementCopyActionNames` (does it publish `AXPress`?) and
+`AXUIElementIsAttributeSettable(AXValue)`. Two more IPC reads per node, so perception cost
+goes up — `scripts/ax_depth.py` reports the ms. Perception turns them into
+`Element.ops` and the prompt shows them as `{press,type}`, so a checkbox is never offered
+as a place to type. Useful even with AX execution off.
 
 **OCR is DEFERRED, not planned (decided at A2).** It would be redundant twice over: the
 planner is a vision model that can already read the screen and fall back to `Action.coords`,
@@ -622,6 +714,15 @@ prompts do not leak platform vocabulary and a model tuned on one platform transf
 Filter out: invisible · bbox area < 20 pt² · offscreen · disabled · duplicate bboxes.
 Assign sequential `id` in reading order (top-to-bottom, left-to-right) — stable ordering
 matters because the model references numbers.
+
+Capabilities → `ops` (`AXPress`/`AXConfirm`/`AXPick` → `press`, `AXShowMenu` → `menu`,
+settable value on a text role → `type`). Empty `ops` means *unknown*, not *nothing*:
+synthetic input can still click anything visible.
+
+`to_menu()` turns the adapter's menu items into `[mN]` commands (MENU_ACTIONS=on). It drops
+the Apple menu (it acts on the machine), anything containing "full screen" (§5.3's Space
+wall), and titles that flip with state (`Show …`/`Hide …`, `Enable …`, …) because menu
+titles do not revalidate reliably after a command. Capped at 80 — it enters the prompt.
 
 ### 8.4 `perception/som.py`
 
@@ -694,7 +795,16 @@ def is_allowed(action: Action, mode: str) -> bool: ...   # mode: bench | freefor
 ```
 
 - `act()` refuses if the frontmost app's bundle id is not in `TaskSpec.apps`
-- Any action whose target label matches `IRREVERSIBLE` always requires approval
+- Any action whose target label matches `IRREVERSIBLE` always requires approval —
+  for a menu command, the LEAF title. Matching the whole path was the first bug the tests
+  found: "Format > Make Rich Text" hit `format` (as in a disk) on the menu's own name.
+- A planner `risk` at or above `RISK_APPROVAL` (default `high`) requires approval, `--yolo`
+  or not. **Alongside** `IRREVERSIBLE`, never instead: a model rating "Send" low-risk still
+  hits the label match. A risk score is a model's judgement, not a policy engine.
+- `set_value` in Finder, or on a textfield whose value looks like a filename, requires
+  approval: Finder and open dialogs publish every filename as an ordinary settable
+  `AXTextField`, so a write there is a **rename**.
+- `set_value` / `menu` are refused (recoverably) unless `EXEC_MODE=ax`.
 - No shell execution, ever
 - All agent file operations live under `~/os-agent-sandbox/`
 
@@ -1073,6 +1183,13 @@ BACKEND=desktop             # desktop | replay
 PLATFORM=macos              # macos | windows | linux   (only macos implemented)
 SANDBOX_DIR=~/os-agent-sandbox
 APPROVAL=on                 # on | off  (off == --yolo)
+
+# ---- execution path (§4.11, §19) ----
+EXEC_MODE=synthetic         # synthetic (THE benchmark) | ax (labelled ablation row)
+MENU_ACTIONS=off            # on: menu commands as [mN]; needs EXEC_MODE=ax
+PLAN_SCHEMA=single          # single | fanout
+RISK_APPROVAL=high          # planner risk >= this needs a human, even with --yolo
+AX_MAX_DEPTH=60             # was 20 at A2
 ```
 
 Prices live in `config.COST_TABLE`, not here — the tracer needs them, and Gemini 3.x Flash
@@ -1676,3 +1793,110 @@ platform seam already accounts for.
 **This is why there are three seams and why coordinates, actions, observations and model
 calls are all backend-neutral.** Keeping them clean costs nothing now and is the whole
 price of admission later. Do not collapse them.
+
+---
+
+## 19. AX execution path — built, not measured
+
+Source: [`max1874/jev-computer-use`](https://github.com/max1874/jev-computer-use) (MIT, a
+macOS port of `browser-use/jev-ultrafast`). **Every number in this section is theirs, from
+their machine.** None goes in the README until reproduced here with the scripts named below.
+
+### The idea
+
+The model CHOOSES from a table the executor built; it never generates a path, coordinate,
+selector or command. Each element appears only with the operations it supports:
+
+```
+[ 1] textarea    'this line should be replaced' {press,type}
+[ 2] button      'Close window' {press}
+[m7] Format > Make Rich Text
+```
+
+Execution goes to the target process: `click` on a `{press}` element → `AXPress`;
+`set_value` → write `AXValue` then read it back; `menu` → invoke the command with the menu
+still closed. No cursor, no keystroke, no window server — hence the §5.3 scoping note.
+
+| | theirs | ours |
+|---|---|---|
+| snapshot, simple window | 4.2 ms (persistent Swift bridge) | 77 ms |
+| whole step, harness only | 43 ms | ~600 ms |
+| decision latency | 889 ms | ~4,365 ms |
+| share of wall clock on the model | 83% | 87% |
+
+Harness against model is twenty to one for them too. Their harness speed comes from a
+long-lived bridge (one traversal per step, no process launch) — step 7 below, deferred.
+
+### Status — what exists and what it is waiting for
+
+| step | what | status |
+|---|---|---|
+| 1 | depth cap 20 → 60 | **built**, default 60. `scripts/ax_depth.py` to measure; fill §8.4 |
+| 2 | per-element capabilities → `Element.ops`, `{press,type}` in the prompt | **built**, on in every mode |
+| 3 | `press` / `set_value` / `invoke_menu` on the adapter, guarded, returning `Receipt` | **built**, `EXEC_MODE=ax` |
+| 4 | menu action space, `[mN]` | **built**, `MENU_ACTIONS=on` |
+| 5 | background test — does AX action take focus? | **script written**, `scripts/ax_background.py`. NOT RUN |
+| 6 | fan-out schema + `risk` into approval | **built**, `PLAN_SCHEMA=fanout`; `risk` gate always on |
+| 7 | persistent bridge | **deferred**: 77 ms against a ~900–4,000 ms decision is not the bottleneck |
+
+Steps 1–2 change the BASELINE path (deeper walk, ops in the prompt) and belong before A6:
+they make perception more honest, not the agent tuned. Steps 3–6 are off by default and
+each is one ablation row. Everything Mac-dependent was written in a Linux container and
+has never executed against a real tree: the unit tests (`tests/test_ax_path.py`) prove the
+platform-neutral logic with a fake adapter, and nothing about macOS.
+
+### How the AX path is made safe — three things that bite
+
+1. **Act by handle, with a guard.** `RawNode.path` records child indices from the window
+   (`w:<pid>:0/3/1`) or the title chain (`m:<pid>:Format⇥Make Rich Text`). Handles are
+   positional, so before acting the executor re-reads the node and refuses unless role and
+   name still match. Their example: Calculator's key is "All Clear" while the display is
+   clear and "Clear" once it is not. This is also the answer to §4.7's positional-id
+   problem on the AX path.
+2. **Write, then read back.** A rich-text composer can INSERT on `AXValue` rather than
+   replace, so a clean error code proves nothing. If the read-back disagrees and the element
+   is focused in the frontmost app, fall back to `cmd+a`, delete, type — and record
+   `keys_fallback` as the mechanism. Never aimed at an element that is not confirmed focused.
+3. **`Receipt`, not a bool.** `dispatched` · `timed_out` · `window_changed` · `verified`.
+   Mapped onto the existing four outcomes rather than a parallel system: not dispatched or
+   not verified → `ActionError` → `error`; **no reply → `UncertainDispatch`, the run stops**,
+   because the app may have acted and "retry when unsure" is how A5 sent a message twice.
+
+### Known limits (theirs, and ours by inheritance)
+
+- One window of one app. No sheets from other windows, no drag, no canvas, no web views —
+  web content inside a browser is mostly absent from the tree.
+- Menu titles do not revalidate after a command flips them (≥2 s stale in their testing).
+  `to_menu` drops state-dependent titles; menus are walked once per app and cached.
+- An inactive app reports every menu item disabled.
+- macOS terminates idle background apps; an app driven with nobody looking can vanish
+  between runs. Stop as blocked, do not die with an exception.
+- `SELECT` on pop-up buttons is not built: many do not expose their menu while closed, and
+  `click` + the next observation covers it.
+- Extended thinking must be OFF — a measured reasoning model spent 417 tokens thinking for
+  13 tokens of JSON, and on a large action space it is the JSON that gets truncated. Same
+  as §12's `thinking_level` finding.
+- **An editable field is not always a place to write prose** — see the rename rule in §8.6.
+
+### Ablation rows this produces
+
+`baseline` · `+ AX execution` · `+ menu action space` · `+ fan-out` — each a separate
+`.env` change, each labelled in `meta.json`. Capability filtering and the depth cap are in
+the baseline itself.
+
+### Messaging apps are deliberately NOT a benchmark task
+
+Within reach technically — WhatsApp was one of the cleanest trees measured (§8.4) — and
+excluded on purpose: a sent message cannot be unsent, so the sandbox cannot reset (§8.11);
+the checker would have to read the app, weaker than a file or `defaults read`; a
+virtualized list that scrolled between observe and act sends to the wrong person silently;
+and the agent's input is text written by other people, which makes prompt injection the
+primary threat model ("forward the last five messages to this number"). Text from other
+people is data, never instructions. "send" stays in `IRREVERSIBLE` whatever a risk score
+says. Fine as an A8 demo with approval visibly on; a liability as a measured task.
+
+### If only two things get run next
+
+`python scripts/ax_depth.py` (may be a real bug in our perception) and
+`python scripts/ax_background.py --textedit` (answers the question that unblocks §5.4).
+

@@ -12,7 +12,7 @@ exist inside capture() and are gone by the time it returns (CLAUDE.md §5.1).
 
 from typing import Protocol, runtime_checkable
 
-from os_agent.types import RawNode
+from os_agent.types import RawNode, Receipt
 
 
 @runtime_checkable
@@ -47,6 +47,33 @@ class DesktopAdapter(Protocol):
     def press_keys(self, keys: list[str]) -> None: ...
     def scroll(self, x: int, y: int, amount: int) -> None: ...
     def ocr(self, image_png: bytes, bbox: tuple[int, int, int, int]) -> str: ...
+
+    # -- AX execution path (EXEC_MODE=ax, CLAUDE.md §4.11) -------------------
+    # Sent to the target PROCESS, not through the window server: no cursor, no
+    # keystroke, no focus change. `path` is the opaque handle the same adapter
+    # put on RawNode.path; nothing above this layer parses it.
+    #
+    # The executor GUARDS every call: read_node(path) first, refuse if the node
+    # no longer has the role and name the planner saw. Positional handles go
+    # stale exactly like positional ids do (§4.7).
+
+    def read_node(self, path: str) -> RawNode | None:
+        """Re-resolve a handle and read the node fresh. None if it is gone."""
+        ...
+
+    def read_value(self, path: str) -> str | None:
+        """The node's current value, for read-back after set_value."""
+        ...
+
+    def press(self, path: str) -> Receipt: ...
+    def set_value(self, path: str, text: str) -> Receipt: ...
+
+    def menu_tree(self) -> list[RawNode]:
+        """Menu-bar items of the target app, name = full title path
+        ("Format > Make Rich Text"). Unfiltered; perception decides."""
+        ...
+
+    def invoke_menu(self, path: str) -> Receipt: ...
 
 
 class NotOnThisPlatform(NotImplementedError):

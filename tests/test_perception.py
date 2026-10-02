@@ -5,7 +5,6 @@ import io
 import pytest
 from PIL import Image
 
-from os_agent.desktop.macos import MacOSAdapter
 from os_agent.perception.elements import normalize_role, to_elements
 from os_agent.perception.som import annotate
 from os_agent.types import Element, RawNode
@@ -17,7 +16,10 @@ def node(role="AXButton", name="OK", bbox=(10, 10, 60, 30), enabled=True):
 
 # -- the §5.1 contract: this is THE test that must never fail ---------------
 def test_capture_is_point_resolution():
-    ad = MacOSAdapter()
+    # macOS only. The import lives here so the platform-neutral tests below
+    # still run on a Linux CI box.
+    macos = pytest.importorskip("os_agent.desktop.macos")
+    ad = macos.MacOSAdapter()
     png, ratio = ad.capture()
     img = Image.open(io.BytesIO(png))
     assert img.size == ad.screen_size_points(), (

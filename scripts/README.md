@@ -6,6 +6,8 @@ by `os_agent/`.
 | Script | Gate | What it proves |
 |---|---|---|
 | `a0_gate.py` | A0 | Screen Recording + Accessibility granted, and the capture:point ratio measured (CLAUDE.md §5.1) |
+| `ax_depth.py` | §19 step 1 | Old (20) vs new (60) AX depth cap per app: nodes, elements, text, ms. Fills §8.4 |
+| `ax_background.py` | §19 step 5 | Does AXPress / AXValue work with the target app BEHIND? Records `took_focus` per op |
 
 ## A0 notes
 

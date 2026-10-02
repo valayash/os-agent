@@ -18,11 +18,21 @@ from pydantic import BaseModel, Field
 # Deliberately absent: "launch", "shell". Launching apps and touching the
 # filesystem are TaskSpec.setup()'s job — trusted project code. The agent's
 # action space contains no shell, ever (CLAUDE.md §8.6).
+#
+# `set_value` and `menu` exist only on the AX execution path (EXEC_MODE=ax,
+# CLAUDE.md §4.11). With EXEC_MODE=synthetic — the benchmark default — the
+# executor refuses them as a recoverable error and the prompt never offers them.
 ActionKind = Literal[
     "click", "double_click", "right_click",
     "type", "key", "scroll", "drag",
+    "set_value", "menu",
     "wait", "done", "fail",
 ]
+
+# The planner's own rating of an action's consequences. A model's judgement,
+# NOT a policy engine: it is wired into approval ALONGSIDE the IRREVERSIBLE
+# label match, never instead of it (CLAUDE.md §8.6).
+Risk = Literal["low", "medium", "high"]
 
 # Verification result. Four values, not a bool — `ambiguous` is the one that
 # costs an LLM call, and driving its rate down is a Phase B target (§4.4).
@@ -51,6 +61,28 @@ class RawNode:
     enabled: bool = True
     focused: bool = False
     depth: int = 0
+    # -- capabilities (CLAUDE.md §8.3) — platform vocabulary, normalized in
+    # perception exactly like `role` is.
+    actions: tuple[str, ...] = ()  # e.g. ("AXPress", "AXShowMenu")
+    value_settable: bool = False  # can the value be written directly?
+    # Opaque handle the SAME adapter can resolve back to this node later, for
+    # AX execution. Perception carries it through and never parses it.
+    path: str = ""
+
+
+@dataclass(slots=True)
+class MenuCommand:
+    """One addressable menu-bar command, e.g. `Format > Make Rich Text`.
+
+    Shown to the planner as `[m7]` in its own list, separate from on-screen
+    elements: it has no geometry, because the menu is CLOSED. Invoking it is
+    one step where clicking through the menu is two (§13 keyboard-first).
+    """
+
+    id: int  # POSITIONAL, like Element.id
+    title: str  # "Format > Make Rich Text"
+    path: str  # adapter handle
+    enabled: bool = True
 
 
 @dataclass(slots=True)
@@ -62,6 +94,10 @@ class Element:
     name: str
     bbox: tuple[int, int, int, int]  # x0, y0, x1, y1 — POINTS
     enabled: bool = True
+    # What can be done to it: "press", "type", "menu". Empty means unknown —
+    # NOT "nothing" — because synthetic input can click anything visible.
+    ops: tuple[str, ...] = ()
+    path: str = ""  # adapter handle for AX execution; opaque here
 
     @property
     def center(self) -> tuple[int, int]:
@@ -92,6 +128,26 @@ class Observation:
     annotated: bytes  # PNG with the SoM overlay drawn on
     elements: list[Element]
     meta: dict = field(default_factory=dict)  # app, bundle_id, title, scale
+    # Menu-bar commands. Empty unless MENU_ACTIONS=on (CLAUDE.md §4.11).
+    menu: list[MenuCommand] = field(default_factory=list)
+
+
+@dataclass(slots=True)
+class Receipt:
+    """What an AX operation can honestly claim. Three facts, never a bool.
+
+    dispatched      the request reached the app. A reply that never came back
+                    means it MAY have run — stop, do not retry.
+    window_changed  something moved. Not success.
+    verified        a read-back agrees with what was asked (set_value only).
+    """
+
+    mechanism: str  # ax_press | ax_set_value | ax_menu | keys_fallback | ...
+    dispatched: bool
+    timed_out: bool = False
+    window_changed: bool | None = None
+    verified: bool | None = None
+    detail: str = ""
 
 
 # --------------------------------------------------------------------------
@@ -111,6 +167,7 @@ class Action:
     # Verify at A4 that the provider's structured output handles fixed-length
     # tuples; if not, this becomes two fields rather than a silent coercion.
     coords: tuple[int, int] | None = None
+    risk: Risk | None = None  # the planner's rating; see Risk above
 
     def is_terminal(self) -> bool:
         """done/fail never reach the executor — the graph ends on them."""
@@ -176,3 +233,68 @@ class PlannedAction(BaseModel):
             "never a narration of what you just did ('clicked the File menu')."
         ),
     )
+
+
+# --------------------------------------------------------------------------
+# Fan-out schema — PLAN_SCHEMA=fanout (CLAUDE.md §4.11, ablation row)
+# --------------------------------------------------------------------------
+FanOutOp = Literal[
+    "click", "type", "set_value", "menu", "key", "scroll", "wait", "done", "fail",
+]
+
+
+class FanOutPlan(BaseModel):
+    """One request, several heads. Only the head matching `operation` runs.
+
+    The model commits to a target for EVERY operation it might take, in the
+    same call. Phase B's speculation reads the unused heads (what would it have
+    done otherwise?), and `risk` comes back with no extra round trip where a
+    separate safety reviewer would be a second call on the critical path.
+    llm_calls_per_step stays 1.00 while each call does more.
+    """
+
+    reasoning: str = Field(description="At most two sentences. Why this action, now.")
+    subgoal: str = Field(description="The immediate objective, a few words.")
+    operation: FanOutOp
+    click_target: int | None = Field(default=None, description="Element to click/press.")
+    type_value: str | None = Field(
+        default=None, description="Text for `type` (at the focus) or `set_value`."
+    )
+    set_target: int | None = Field(
+        default=None, description="Element whose value `set_value` REPLACES."
+    )
+    menu_target: int | None = Field(default=None, description="Menu command number, [mN].")
+    keys: list[str] | None = Field(default=None, description='e.g. ["cmd","s"].')
+    scroll_target: int | None = None
+    amount: int | None = Field(default=None, description="scroll ticks or wait ms.")
+    risk: Risk = Field(
+        default="low",
+        description="high = deletes, sends, overwrites or cannot be undone.",
+    )
+    expect: Expectation
+    confidence: float = Field(ge=0.0, le=1.0)
+    new_fact: str | None = None
+
+    def to_planned(self) -> PlannedAction:
+        """Collapse to the one action that executes. Missing heads stay None,
+        and the executor refuses them as a recoverable error — never guessed."""
+        op = self.operation
+        a = Action(kind=op, risk=self.risk)
+        if op == "click":
+            a.element_id = self.click_target
+        elif op == "type":
+            a.text = self.type_value
+        elif op == "set_value":
+            a.element_id, a.text = self.set_target, self.type_value
+        elif op == "menu":
+            a.element_id = self.menu_target
+        elif op == "key":
+            a.keys = self.keys
+        elif op == "scroll":
+            a.element_id, a.amount = self.scroll_target, self.amount
+        elif op == "wait":
+            a.amount = self.amount
+        return PlannedAction(
+            reasoning=self.reasoning, subgoal=self.subgoal, action=a,
+            expect=self.expect, confidence=self.confidence, new_fact=self.new_fact,
+        )

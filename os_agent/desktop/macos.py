@@ -5,6 +5,9 @@
     keyboard:   CGEvent with explicit flags  — NOT pyautogui, see below
     mouse:      pyautogui (this half is fine)
     tree / ocr: A2
+    AX exec:    AXUIElementPerformAction / AXUIElementSetAttributeValue — the
+                EXEC_MODE=ax path (CLAUDE.md §4.11). Straight into the target
+                process; no window server, no cursor, no focus change.
 """
 
 import io
@@ -18,8 +21,11 @@ import Quartz
 import structlog
 from AppKit import NSScreen, NSWorkspace
 from ApplicationServices import (
+    AXUIElementCopyActionNames,
     AXUIElementCopyAttributeValue,
     AXUIElementCreateApplication,
+    AXUIElementIsAttributeSettable,
+    AXUIElementPerformAction,
     AXUIElementSetAttributeValue,
     AXUIElementSetMessagingTimeout,
     AXValueCreate,
@@ -29,8 +35,9 @@ from ApplicationServices import (
 )
 from PIL import Image
 
+from os_agent.config import settings
 from os_agent.desktop.base import NotOnThisPlatform
-from os_agent.types import RawNode
+from os_agent.types import RawNode, Receipt
 
 # Slam the cursor into a screen corner to abort everything. The only kill
 # switch that works while the agent is mid-action (CLAUDE.md §8.5).
@@ -89,9 +96,33 @@ _LTR_MARK = "‎"
 
 # Perception cost controls (CLAUDE.md §8.2).
 _AX_TIMEOUT_S = 0.5
-_MAX_DEPTH = 20
+# Depth cap: settings.ax_max_depth (AX_MAX_DEPTH, default 60). 20 was the A2
+# value, kept as a name so scripts/ax_depth.py can compare the two.
+_MAX_DEPTH_A2 = 20
 _MAX_NODES = 300
 _MAX_NAME = 120
+
+# Containers: never offered an operation, so their capabilities are not worth
+# two extra IPC round-trips each. A cost control, like pruning — not a filter:
+# the node is still emitted.
+_CONTAINER_ROLES = {
+    "AXGroup", "AXSplitGroup", "AXScrollArea", "AXLayoutArea", "AXLayoutItem",
+    "AXWindow", "AXSheet", "AXToolbar", "AXTabGroup", "AXList", "AXOutline",
+    "AXTable", "AXColumn", "AXBrowser", "AXUnknown", "AXSplitter", "AXWebArea",
+    "AXStaticText", "AXImage",
+}
+
+# AX error codes worth naming (AXError.h).
+_AX_ERR_CANNOT_COMPLETE = -25204  # the app never replied: it MAY have acted
+_AX_ERR_INVALID_ELEMENT = -25202
+
+# Menu walk caps. Menus are walked eagerly only on the AX path, cached per pid.
+_MENU_MAX_DEPTH = 3  # bar item > menu item > submenu item
+_MENU_MAX_ITEMS = 400
+
+# Path handles: "w:<pid>:0/3/1" (child indices under the window) and
+# "m:<pid>:Format<TAB>Make Rich Text" (titles under the menu bar).
+_SEP = "\t"
 
 
 def _attr(node, name: str):
@@ -117,6 +148,20 @@ def _bbox(node) -> tuple[int, int, int, int] | None:
     return x, y, x + int(size.width), y + int(size.height)
 
 
+def _capabilities(node, role: str) -> tuple[tuple[str, ...], bool]:
+    """(action names, is AXValue settable). Two IPC reads; skipped on containers."""
+    if role in _CONTAINER_ROLES:
+        return (), False
+    err, names = AXUIElementCopyActionNames(node, None)
+    actions = tuple(str(n) for n in names) if err == 0 and names else ()
+    err, settable = AXUIElementIsAttributeSettable(node, "AXValue", None)
+    return actions, bool(settable) if err == 0 else False
+
+
+def _clean(v) -> str:
+    return str(v or "").replace(_LTR_MARK, "").strip()
+
+
 def _source():
     return Quartz.CGEventSourceCreate(Quartz.kCGEventSourceStateHIDSystemState)
 
@@ -129,6 +174,12 @@ def _post(event, flags: int) -> None:
 
 class MacOSAdapter:
     name = "macos"
+
+    def __init__(self, *, max_depth: int | None = None) -> None:
+        self.max_depth = settings.ax_max_depth if max_depth is None else max_depth
+        # Menus are hundreds of IPC reads; titles we offer are the stable ones
+        # (perception drops state-flipping titles), so walk once per app.
+        self._menu_cache: dict[int, list[RawNode]] = {}
 
     # -- geometry ----------------------------------------------------------
     def screen_size_points(self) -> tuple[int, int]:
@@ -424,12 +475,25 @@ class MacOSAdapter:
         # not enough: this walk had its own copy of the same broken call, so
         # perception kept reading the spawning app's tree while the reporter
         # said the right thing. Two call sites, one truth — keep them together.
+        pid = self._target_pid()
+        return [] if pid is None else self.tree_for_pid(pid)
+
+    def _target_pid(self) -> int | None:
         pid = self._frontmost_window_pid()
         if pid is None:
             app = NSWorkspace.sharedWorkspace().frontmostApplication()
             if app is None:
-                return []
+                return None
             pid = app.processIdentifier()
+        return pid
+
+    def tree_for_pid(self, pid: int, *, max_depth: int | None = None) -> list[RawNode]:
+        """raw_tree() for ANY app by pid — no focus needed (§5.3 scoping).
+
+        The agent always uses the frontmost app; scripts/ax_background.py and
+        scripts/ax_depth.py use this directly.
+        """
+        depth_cap = self.max_depth if max_depth is None else max_depth
         ref = AXUIElementCreateApplication(pid)
         AXUIElementSetMessagingTimeout(ref, _AX_TIMEOUT_S)
 
@@ -453,24 +517,27 @@ class MacOSAdapter:
                     bbox = _bbox(item)
                     if bbox is None:
                         continue
-                    title = _attr(item, "AXTitle")
+                    title = _clean(_attr(item, "AXTitle"))
                     out.append(
                         RawNode(
                             role=str(_attr(item, "AXRole") or "AXMenuBarItem"),
-                            name=str(title or "").replace(_LTR_MARK, "").strip()[:_MAX_NAME],
+                            name=title[:_MAX_NAME],
                             bbox=bbox,
                             enabled=True,
                             depth=1,
+                            actions=("AXPress",),
+                            path=f"m:{pid}:{title}",
                         )
                     )
 
         err, windows = AXUIElementCopyAttributeValue(ref, "AXWindows", None)
         if err == 0 and windows:
-            self._walk(windows[0], 0, out, sw, sh)
+            self._walk(windows[0], 0, out, sw, sh, pid=pid, idx=(), depth_cap=depth_cap)
         return out
 
-    def _walk(self, node, depth: int, out: list[RawNode], sw: int, sh: int) -> None:
-        if depth > _MAX_DEPTH or len(out) >= _MAX_NODES:
+    def _walk(self, node, depth: int, out: list[RawNode], sw: int, sh: int, *,
+              pid: int, idx: tuple[int, ...], depth_cap: int) -> None:
+        if depth > depth_cap or len(out) >= _MAX_NODES:
             return
 
         role = _attr(node, "AXRole")
@@ -495,6 +562,7 @@ class MacOSAdapter:
                 break
 
         enabled = _attr(node, "AXEnabled")
+        actions, settable = _capabilities(node, str(role))
         out.append(
             RawNode(
                 role=str(role),
@@ -503,13 +571,213 @@ class MacOSAdapter:
                 enabled=True if enabled is None else bool(enabled),
                 focused=bool(_attr(node, "AXFocused") or False),
                 depth=depth,
+                actions=actions,
+                value_settable=settable,
+                path=f"w:{pid}:{'/'.join(map(str, idx))}",
             )
         )
 
         children = _attr(node, "AXChildren")
         if children:
-            for child in children:
-                self._walk(child, depth + 1, out, sw, sh)
+            for i, child in enumerate(children):
+                self._walk(child, depth + 1, out, sw, sh,
+                           pid=pid, idx=idx + (i,), depth_cap=depth_cap)
+
+    # -- AX execution path (EXEC_MODE=ax, CLAUDE.md §4.11) ------------------
+    #
+    # UNVERIFIED ON THIS MACHINE. The claim that these need no focus comes from
+    # max1874/jev-computer-use (took_focus == False on Calculator).
+    # scripts/ax_background.py is the test; until it has run here, §5.3 stands
+    # as written for both paths.
+
+    def _resolve(self, path: str):
+        """Handle -> live AXUIElement, or None. Walks the same child indices
+        the perception walk recorded, so a reordered tree resolves to a
+        DIFFERENT node — which is why the executor guards on role + name."""
+        try:
+            kind, pid_s, rest = path.split(":", 2)
+            pid = int(pid_s)
+        except ValueError:
+            return None
+        ref = AXUIElementCreateApplication(pid)
+        AXUIElementSetMessagingTimeout(ref, _AX_TIMEOUT_S)
+        if kind == "w":
+            windows = _attr(ref, "AXWindows")
+            if not windows:
+                return None
+            node = windows[0]
+            for i in (int(x) for x in rest.split("/") if x != ""):
+                kids = _attr(node, "AXChildren")
+                if not kids or i >= len(kids):
+                    return None
+                node = kids[i]
+            return node
+        if kind == "m":
+            node = _attr(ref, "AXMenuBar")
+            for depth, title in enumerate(rest.split(_SEP)):
+                if node is None:
+                    return None
+                if depth > 0:  # bar item / menu item -> its AXMenu
+                    menus = _attr(node, "AXChildren")
+                    node = menus[0] if menus else None
+                    if node is None:
+                        return None
+                kids = _attr(node, "AXChildren") or []
+                node = next((k for k in kids if _clean(_attr(k, "AXTitle")) == title), None)
+            return node
+        return None
+
+    def read_node(self, path: str) -> RawNode | None:
+        node = self._resolve(path)
+        if node is None:
+            return None
+        role = _attr(node, "AXRole")
+        if role is None:
+            return None
+        name = ""
+        for a in ("AXTitle", "AXDescription", "AXValue"):
+            if v := _attr(node, a):
+                name = _clean(v)
+                break
+        if path.startswith("m:"):
+            name = " > ".join(path.split(":", 2)[2].split(_SEP))
+        actions, settable = _capabilities(node, str(role))
+        enabled = _attr(node, "AXEnabled")
+        return RawNode(
+            role=str(role), name=name[:_MAX_NAME], bbox=_bbox(node),
+            enabled=True if enabled is None else bool(enabled),
+            focused=bool(_attr(node, "AXFocused") or False),
+            actions=actions, value_settable=settable, path=path,
+        )
+
+    def read_value(self, path: str) -> str | None:
+        node = self._resolve(path)
+        if node is None:
+            return None
+        v = _attr(node, "AXValue")
+        return None if v is None else str(v)
+
+    def _window_sig(self, path: str) -> tuple:
+        """Coarse 'did the window move?' — title + top-level child count."""
+        try:
+            pid = int(path.split(":", 2)[1])
+        except (ValueError, IndexError):
+            return ()
+        ref = AXUIElementCreateApplication(pid)
+        AXUIElementSetMessagingTimeout(ref, _AX_TIMEOUT_S)
+        wins = _attr(ref, "AXWindows") or []
+        if not wins:
+            return (0,)
+        return (len(wins), _clean(_attr(wins[0], "AXTitle")),
+                len(_attr(wins[0], "AXChildren") or []))
+
+    def _perform(self, path: str, action: str, mechanism: str) -> Receipt:
+        node = self._resolve(path)
+        if node is None:
+            return Receipt(mechanism, dispatched=False, detail="handle no longer resolves")
+        before = self._window_sig(path)
+        err = AXUIElementPerformAction(node, action)
+        if err == _AX_ERR_CANNOT_COMPLETE:
+            # No reply inside the timeout. The app may well have acted.
+            return Receipt(mechanism, dispatched=True, timed_out=True,
+                           detail=f"{action}: no reply in {_AX_TIMEOUT_S}s")
+        if err != 0:
+            return Receipt(mechanism, dispatched=False, detail=f"{action} -> AXError {err}")
+        time.sleep(0.15)
+        return Receipt(mechanism, dispatched=True,
+                       window_changed=self._window_sig(path) != before)
+
+    def press(self, path: str) -> Receipt:
+        return self._perform(path, "AXPress", "ax_press")
+
+    def invoke_menu(self, path: str) -> Receipt:
+        """Invoke a menu command with the menu still CLOSED. One step, not two.
+        Note an INACTIVE app reports every menu item disabled; the receipt
+        says what AX answered, it does not pretend."""
+        return self._perform(path, "AXPress", "ax_menu")
+
+    def set_value(self, path: str, text: str) -> Receipt:
+        """Write, then READ BACK. Never trust the error code alone.
+
+        A rich-text composer can INSERT rather than replace on AXValue, so a
+        clean return code proves nothing. If the read-back disagrees and the
+        element is focused in the frontmost app, fall back to erase-by-keys
+        then typing, and say so in the receipt — which mechanism ran is part
+        of the result.
+        """
+        node = self._resolve(path)
+        if node is None:
+            return Receipt("ax_set_value", dispatched=False, detail="handle no longer resolves")
+        err = AXUIElementSetAttributeValue(node, "AXValue", text)
+        if err == _AX_ERR_CANNOT_COMPLETE:
+            return Receipt("ax_set_value", dispatched=True, timed_out=True,
+                           detail="no reply; the value MAY have been written")
+        got = self.read_value(path)
+        if err == 0 and got is not None and got.rstrip("\n") == text:
+            return Receipt("ax_set_value", dispatched=True, verified=True)
+
+        # Fallback: keyboard. Aimed ONLY at an element confirmed focused in the
+        # frontmost app — keystrokes go wherever focus is, and erasing the
+        # wrong field is the one thing worse than not writing this one.
+        pid = int(path.split(":", 2)[1])
+        focused = bool(_attr(node, "AXFocused") or False)
+        if not (focused and self._frontmost_window_pid() == pid):
+            return Receipt("ax_set_value", dispatched=err == 0, verified=False,
+                           detail=f"read back {str(got)[:40]!r} (err {err}); "
+                                  "not focused, keyboard fallback refused")
+        self.press_keys(["command", "a"])
+        self.press_keys(["delete"])
+        self.type_text(text)
+        got = self.read_value(path)
+        return Receipt("keys_fallback", dispatched=True,
+                       verified=got is not None and got.rstrip("\n") == text,
+                       detail=f"AXValue refused or inserted (err {err})")
+
+    def menu_tree(self) -> list[RawNode]:
+        pid = self._target_pid()
+        if pid is None:
+            return []
+        if pid not in self._menu_cache:
+            self._menu_cache[pid] = self._walk_menus(pid)
+        return self._menu_cache[pid]
+
+    def _walk_menus(self, pid: int) -> list[RawNode]:
+        ref = AXUIElementCreateApplication(pid)
+        AXUIElementSetMessagingTimeout(ref, _AX_TIMEOUT_S)
+        bar = _attr(ref, "AXMenuBar")
+        out: list[RawNode] = []
+        if bar is None:
+            return out
+
+        def walk(container, titles: list[str]) -> None:
+            if len(titles) > _MENU_MAX_DEPTH or len(out) >= _MENU_MAX_ITEMS:
+                return
+            for item in _attr(container, "AXChildren") or []:
+                if len(out) >= _MENU_MAX_ITEMS:
+                    return
+                title = _clean(_attr(item, "AXTitle"))
+                if not title:  # separators
+                    continue
+                chain = titles + [title]
+                sub = _attr(item, "AXChildren") or []
+                if sub:  # has a submenu: descend, do not emit the parent
+                    walk(sub[0], chain)
+                    continue
+                if len(chain) < 2:
+                    continue
+                enabled = _attr(item, "AXEnabled")
+                out.append(RawNode(
+                    role="AXMenuItem", name=" > ".join(chain)[:_MAX_NAME], bbox=None,
+                    enabled=True if enabled is None else bool(enabled),
+                    actions=("AXPress",), path=f"m:{pid}:{_SEP.join(chain)}",
+                ))
+
+        for bar_item in _attr(bar, "AXChildren") or []:
+            title = _clean(_attr(bar_item, "AXTitle"))
+            menus = _attr(bar_item, "AXChildren") or []
+            if title and menus:
+                walk(menus[0], [title])
+        return out
 
     def ocr(self, image_png: bytes, bbox: tuple[int, int, int, int]) -> str:
         # A2: VNRecognizeTextRequest (Apple Vision) — on-device, Neural Engine,

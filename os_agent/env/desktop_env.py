@@ -11,9 +11,10 @@ import structlog
 
 from os_agent.actions.executor import ApproveFn, Executor
 from os_agent.bench import tasks
+from os_agent.config import settings
 from os_agent.desktop.base import DesktopAdapter, NotOnThisPlatform
 from os_agent.env.base import Environment
-from os_agent.perception.elements import screen_fingerprint, to_elements
+from os_agent.perception.elements import screen_fingerprint, to_elements, to_menu
 from os_agent.perception.som import annotate
 from os_agent.types import Action, Observation
 
@@ -28,10 +29,15 @@ class DesktopEnv(Environment):
         mode: str = "bench",
         approve: ApproveFn | None = None,
         approval_on: bool = True,
+        exec_mode: str | None = None,
+        menu_actions: bool | None = None,
     ) -> None:
         self.adapter = adapter
         self.mode = mode
-        self.executor = Executor(adapter, approve=approve, approval_on=approval_on)
+        self.exec_mode = settings.exec_mode if exec_mode is None else exec_mode
+        self.menu_actions = settings.menu_actions if menu_actions is None else menu_actions
+        self.executor = Executor(adapter, approve=approve, approval_on=approval_on,
+                                 exec_mode=self.exec_mode)
         self.task: tasks.TaskSpec | None = None
         # The elements we last showed. act() needs them to turn element_id into
         # a screen position, and A4 found the alternative the hard way: passing
@@ -40,6 +46,7 @@ class DesktopEnv(Environment):
         # every action with "element_id 13 is not on screen (ids present: [])".
         # The environment already knows what it last rendered. Ask it.
         self._last_elements: list = []
+        self._last_menu: list = []
 
     # ------------------------------------------------------------------
     async def reset(self, task_id: str) -> Observation:
@@ -64,10 +71,12 @@ class DesktopEnv(Environment):
 
         name, bundle = self.adapter.frontmost_app()
         elements = to_elements(nodes, app=bundle)
+        menu = to_menu(self._safe_menu()) if self.menu_actions else []
         annotated = annotate(png, elements) if elements else png
         perception_ms = (time.perf_counter() - t0) * 1000
 
         self._last_elements = elements
+        self._last_menu = menu
         return Observation(
             screenshot=png,
             annotated=annotated,
@@ -83,13 +92,22 @@ class DesktopEnv(Environment):
                 "perception_ms": round(perception_ms, 1),
                 "elements": len(elements),
                 "sparse": len(elements) < 3,
+                "menu_items": len(menu),
+                "exec_mode": self.exec_mode,
             },
+            menu=menu,
         )
 
     def _safe_tree(self) -> list:
         """A2 is not built yet. Say so in meta rather than crashing the gate."""
         try:
             return self.adapter.raw_tree()
+        except NotOnThisPlatform:
+            return []
+
+    def _safe_menu(self) -> list:
+        try:
+            return self.adapter.menu_tree()
         except NotOnThisPlatform:
             return []
 
@@ -100,6 +118,7 @@ class DesktopEnv(Environment):
             obs_elements,
             mode=self.mode,
             allowed_bundles=self.task.apps if self.task else None,
+            menu=self._last_menu,
         )
 
     def evaluate(self) -> float:
