@@ -20,7 +20,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from os_agent.config import settings
-from os_agent.types import Action, Element
+from os_agent.types import Action, Element, MenuCommand
 
 # Anything whose target label matches always requires a human (CLAUDE.md §8.6).
 IRREVERSIBLE: set[str] = {
@@ -66,6 +66,17 @@ DANGEROUS_CHORDS: set[frozenset[str]] = {
     frozenset({"command", "shift", "delete"}),  # empty trash
     frozenset({"command", "q"}),           # quit — loses unsaved work
 }
+
+# `set_value` aimed at one of these is a RENAME, not a write (CLAUDE.md §4.11).
+# Finder and open/save dialogs publish every filename as an ordinary AXTextField
+# with a settable value — indistinguishable from a search box by role. The
+# reference repo renamed two files by accident this way; neither reached disk
+# only because a rename commits on Return. Not something to rely on twice.
+RENAME_RISK_BUNDLES: set[str] = {"com.apple.finder"}
+_FILENAME = re.compile(r"\.[A-Za-z0-9]{1,5}$")
+
+# Planner risk levels, ordered. RISK_APPROVAL names the lowest that needs a human.
+RISK_ORDER = {"low": 0, "medium": 1, "high": 2}
 
 # Modes. `bench` is the strict one: a benchmark run must never wander.
 MODES = ("bench", "freeform")
@@ -131,8 +142,19 @@ def commits_outward(action: Action) -> str | None:
     return None
 
 
-def _target_label(action: Action, elements: list[Element]) -> str:
+def _target_label(action: Action, elements: list[Element],
+                  menu: list[MenuCommand] | None = None) -> str:
     if action.element_id is None:
+        return ""
+    if action.kind == "menu":
+        # The LEAF of the title path: "File > Move to Trash" must hit
+        # IRREVERSIBLE exactly as a button called that would. Not the whole
+        # path — found by the first test run: "Format > Make Rich Text" hit
+        # the term `format` (as in "format a disk") on the MENU's name, so
+        # every command in the Format menu would have needed a human.
+        for m in menu or []:
+            if m.id == action.element_id:
+                return m.title.rsplit(">", 1)[-1].strip()
         return ""
     for el in elements:
         if el.id == action.element_id:
@@ -140,9 +162,30 @@ def _target_label(action: Action, elements: list[Element]) -> str:
     return ""
 
 
+def rename_risk(action: Action, elements: list[Element], bundle: str) -> str | None:
+    """Would this set_value rename something? Reason, or None."""
+    if action.kind != "set_value":
+        return None
+    if bundle in RENAME_RISK_BUNDLES:
+        return f"set_value inside {bundle} edits a FILENAME field"
+    target = next((e for e in elements if e.id == action.element_id), None)
+    if target is not None and target.role == "textfield" and _FILENAME.search(target.name):
+        return f"set_value on {target.name!r}, which looks like a filename — a rename"
+    return None
+
+
+def risk_hit(action: Action, threshold: str) -> str | None:
+    if threshold == "off" or action.risk is None:
+        return None
+    if RISK_ORDER.get(action.risk, 0) >= RISK_ORDER[threshold]:
+        return f"planner rated this action risk={action.risk} (gate: >= {threshold})"
+    return None
+
+
 def requires_approval(
     action: Action, elements: list[Element], *, approval_on: bool = True,
-    repeated: bool = False,
+    repeated: bool = False, menu: list[MenuCommand] | None = None,
+    bundle: str = "", risk_threshold: str | None = None,
 ) -> str | None:
     """Reason a human must confirm, or None.
 
@@ -156,9 +199,19 @@ def requires_approval(
     approval EVEN WITH --yolo. Those are not a convenience prompt; they are the
     line §8.6 draws, and a flag does not move it.
     """
-    label = _target_label(action, elements)
+    label = _target_label(action, elements, menu)
     if label and (hit := irreversible_hit(label)):
         return f"target label {label!r} matches irreversible term {hit!r}"
+
+    # Alongside IRREVERSIBLE, never instead of it: the label match above runs
+    # whatever the model rated the action. A model calling "Send" low-risk
+    # does not get to skip the human.
+    if why := risk_hit(action, settings.risk_approval if risk_threshold is None
+                       else risk_threshold):
+        return why
+
+    if why := rename_risk(action, elements, bundle):
+        return why
 
     if action.kind == "key" and action.keys:
         chord = frozenset(k.lower() for k in action.keys)
@@ -187,6 +240,9 @@ def check(
     allowed_bundles: list[str] | None,
     approval_on: bool | None = None,
     repeated: bool = False,
+    menu: list[MenuCommand] | None = None,
+    exec_mode: str | None = None,
+    risk_threshold: str | None = None,
 ) -> Verdict:
     """The single call the executor makes before doing anything."""
     if mode not in MODES:
@@ -204,13 +260,25 @@ def check(
             ),
         )
 
+    exec_mode = settings.exec_mode if exec_mode is None else exec_mode
+    if action.kind in ("set_value", "menu") and exec_mode != "ax":
+        # The benchmark path is synthetic input only (§4.11). Recoverable: the
+        # planner can do the same thing with click/type.
+        return Verdict(False, recoverable=True,
+                       reason=f"{action.kind} needs EXEC_MODE=ax; use click/type/key")
+
+    if action.kind in ("set_value", "menu") and action.element_id is None:
+        return Verdict(False, recoverable=True, reason=f"{action.kind} needs element_id")
+
     if action.kind == "click" and action.element_id is None and action.coords is None:
         # Malformed output, not a forbidden act. Tell the planner and move on.
         return Verdict(False, recoverable=True,
                        reason="click with neither element_id nor coords")
 
     on = settings.approval if approval_on is None else approval_on
-    if reason := requires_approval(action, elements, approval_on=on, repeated=repeated):
+    if reason := requires_approval(action, elements, approval_on=on, repeated=repeated,
+                                   menu=menu, bundle=frontmost_bundle,
+                                   risk_threshold=risk_threshold):
         return Verdict(True, needs_approval=True, reason=reason)
 
     return Verdict(True)

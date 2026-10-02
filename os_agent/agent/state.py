@@ -27,7 +27,7 @@ is REBUILT from state each step, never appended to (§4.2, §11).
 from typing import TypedDict
 
 from os_agent.config import settings
-from os_agent.types import Action, Element, Expectation
+from os_agent.types import Action, Element, Expectation, MenuCommand
 
 # Bounded bookkeeping (§5.2): these never enter the prompt, so they only need
 # to be bounded, not fixed-size.
@@ -52,6 +52,9 @@ class AgentState(TypedDict, total=False):
     screenshot_plain_b64: str  # clean — evidence for the pixel diff
     obs_fresh: bool  # verify captured already; observe is then a no-op (§8.8)
     screen_hash: str  # fingerprint of the element set, for loop detection
+    # Menu-bar commands, MENU_ACTIONS=on only. Enters the prompt, so it is
+    # capped at perception.elements.MENU_CAP — fixed-size, like facts.
+    menu: list[MenuCommand]
 
     # -- what just happened -------------------------------------------------
     subgoal: str
@@ -111,6 +114,7 @@ def initial_state(goal: str, task_id: str = "freeform",
         screenshot_plain_b64="",
         obs_fresh=False,
         screen_hash="",
+        menu=[],
         subgoal="",
         reasoning="",
         last_action=None,

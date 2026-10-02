@@ -16,9 +16,11 @@ from os_agent.actions.policy import (
     check,
     commits_outward,
 )
+from os_agent.config import settings
 from os_agent.desktop.base import DesktopAdapter
 from os_agent.env.base import ActionError, ApprovalDenied, PolicyViolation
-from os_agent.types import Action, Element
+from os_agent.perception.elements import normalize_role
+from os_agent.types import Action, Element, MenuCommand, Receipt
 
 log = structlog.get_logger(__name__)
 
@@ -30,6 +32,12 @@ SETTLE_S = 0.5
 ApproveFn = Callable[[Action, Verdict], bool]
 
 
+class UncertainDispatch(PolicyViolation):
+    """An AX request got no reply. It MAY have run, so it must not be retried —
+    "retry when unsure" is correct for a click and catastrophic for a send.
+    A PolicyViolation so the run ends rather than the planner trying again."""
+
+
 class Executor:
     def __init__(
         self,
@@ -37,8 +45,13 @@ class Executor:
         approve: ApproveFn | None = None,
         *,
         approval_on: bool = True,
+        exec_mode: str | None = None,
     ) -> None:
         self.adapter = adapter
+        self.exec_mode = settings.exec_mode if exec_mode is None else exec_mode
+        # What the AX path could honestly claim about the last action list.
+        # Which MECHANISM ran is part of the result (§4.11), so it is kept.
+        self.receipts: list[Receipt] = []
         self.approve = approve
         self.approval_on = approval_on
         # Every action already executed this run. A repeated COMMIT action —
@@ -58,8 +71,11 @@ class Executor:
         *,
         mode: str,
         allowed_bundles: list[str] | None,
+        menu: list[MenuCommand] | None = None,
     ) -> None:
         """Execute in order. Any refusal aborts the whole list."""
+        self.receipts = []
+        menu = menu or []
         for action in actions:
             _, bundle = self.adapter.frontmost_app()
             fingerprint = self._fingerprint(action)
@@ -71,6 +87,8 @@ class Executor:
                 allowed_bundles=allowed_bundles,
                 approval_on=self.approval_on,
                 repeated=fingerprint in self._executed,
+                menu=menu,
+                exec_mode=self.exec_mode,
             )
             if not verdict.allowed:
                 log.warning("policy.refused", kind=action.kind, reason=verdict.reason,
@@ -107,7 +125,7 @@ class Executor:
             # A malformed action is the planner's mistake to correct, so it
             # arrives as one more `outcome=error` with the reason attached.
             try:
-                self._dispatch(action, elements)
+                self._dispatch(action, elements, menu)
             except (ActionError, PolicyViolation, ApprovalDenied):
                 # An action that was REFUSED never reached the world, so it
                 # must not spend a commit slot. Found by running the newline
@@ -158,8 +176,99 @@ class Executor:
             f"(ids present: {[e.id for e in elements][:20]})"
         )
 
-    def _dispatch(self, action: Action, elements: list[Element]) -> None:
+    # -- AX path (EXEC_MODE=ax) ----------------------------------------------
+    def _element(self, action: Action, elements: list[Element]) -> Element:
+        el = next((e for e in elements if e.id == action.element_id), None)
+        if el is None:
+            raise ActionError(
+                f"element_id {action.element_id} is not on screen "
+                f"(ids present: {[e.id for e in elements][:20]})"
+            )
+        return el
+
+    def _guard(self, el: Element) -> None:
+        """Act by handle, but only on the node the planner actually saw.
+
+        Handles are positional too — a reordered tree resolves the same path to
+        a DIFFERENT node. So re-read it and refuse unless role and name still
+        match. The reference repo's example: Calculator's button is "All
+        Clear" while the display is clear and "Clear" once it is not.
+        """
+        node = self.adapter.read_node(el.path)
+        if node is None:
+            raise ActionError(f"element {el.id} ({el.role} {el.name!r}) is gone")
+        role = normalize_role(node.role)
+        if role != el.role or node.name != el.name:
+            raise ActionError(
+                f"element {el.id} changed since it was observed: was "
+                f"{el.role} {el.name!r}, now {role} {node.name!r}. Re-read the screen."
+            )
+
+    def _settle_receipt(self, r: Receipt) -> None:
+        self.receipts.append(r)
+        log.info("act.receipt", mechanism=r.mechanism, dispatched=r.dispatched,
+                 timed_out=r.timed_out, window_changed=r.window_changed,
+                 verified=r.verified, detail=r.detail[:120])
+        if r.timed_out:
+            raise UncertainDispatch(
+                f"{r.mechanism} got no reply and MAY have run ({r.detail}). "
+                "Not retrying: a repeat could duplicate the side effect."
+            )
+        if not r.dispatched:
+            raise ActionError(f"{r.mechanism} was not delivered: {r.detail}")
+        if r.verified is False:
+            raise ActionError(f"{r.mechanism} did not stick: {r.detail}")
+
+    def _dispatch_ax(self, action: Action, elements: list[Element],
+                     menu: list[MenuCommand]) -> bool:
+        """Handle the action on the AX path. False = not an AX action here,
+        fall through to synthetic input."""
         k = action.kind
+        if k == "menu":
+            cmd = next((m for m in menu if m.id == action.element_id), None)
+            if cmd is None:
+                raise ActionError(f"menu command m{action.element_id} is not in the menu list")
+            node = self.adapter.read_node(cmd.path)
+            if node is None or node.name != cmd.title:
+                raise ActionError(f"menu command {cmd.title!r} no longer resolves")
+            log.info("act.menu", title=cmd.title)
+            self._settle_receipt(self.adapter.invoke_menu(cmd.path))
+            return True
+        if k == "set_value":
+            if action.text is None:
+                raise ActionError("set_value with no text")
+            el = self._element(action, elements)
+            if "type" not in el.ops or not el.path:
+                raise ActionError(
+                    f"element {el.id} ({el.role}) does not accept a written value; "
+                    f"its operations are {list(el.ops) or 'unknown'}"
+                )
+            self._guard(el)
+            log.info("act.set_value", element_id=el.id, chars=len(action.text))
+            self._settle_receipt(self.adapter.set_value(el.path, action.text))
+            return True
+        if k == "click" and action.coords is None and action.element_id is not None:
+            el = self._element(action, elements)
+            if "press" in el.ops and el.path:
+                self._guard(el)
+                log.info("act.press", element_id=el.id, role=el.role)
+                self._settle_receipt(self.adapter.press(el.path))
+                return True
+            # No press action published: a real click is the only way in.
+            # Recorded, because it needs focus where AXPress does not.
+            log.info("act.press.fallback", element_id=el.id, why="no AXPress; synthetic click")
+            self.receipts.append(Receipt("synthetic_click", dispatched=True,
+                                         detail="element publishes no press action"))
+        return False
+
+    def _dispatch(self, action: Action, elements: list[Element],
+                  menu: list[MenuCommand] | None = None) -> None:
+        k = action.kind
+        if self.exec_mode == "ax" and self._dispatch_ax(action, elements, menu or []):
+            return
+        if k in ("set_value", "menu"):
+            # policy.check refuses these first; this is the backstop.
+            raise ActionError(f"{k} needs EXEC_MODE=ax")
         if k in ("click", "double_click", "right_click"):
             x, y = self._point(action, elements)
             log.info("act.click", kind=k, x=x, y=y, element_id=action.element_id)

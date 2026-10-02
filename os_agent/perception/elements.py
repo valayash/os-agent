@@ -19,7 +19,7 @@ import hashlib
 
 import structlog
 
-from os_agent.types import Element, RawNode
+from os_agent.types import Element, MenuCommand, RawNode
 
 log = structlog.get_logger(__name__)
 
@@ -61,6 +61,19 @@ ALWAYS_INTERACTIVE = {
 # decoration, and decoration is the thing that floods the overlay.
 NAMED_ONLY = {"cell", "row", "text", "image"}
 
+# Platform action names -> our operations. Same reason as ROLE_MAP: prompts
+# never carry platform dialect.
+ACTION_MAP: dict[str, str] = {
+    "AXPress": "press",
+    "AXConfirm": "press",
+    "AXPick": "press",
+    "AXShowMenu": "menu",
+}
+
+# A settable value is only a place to TYPE on these roles. A settable checkbox
+# or slider value is real, but "type into a checkbox" is not an operation.
+TEXT_ROLES = {"textfield", "textarea", "searchfield", "combobox"}
+
 MIN_AREA = 20        # pt^2 — below this a box is not clickable anyway
 ROW_BAND = 10        # pt — see _reading_order
 SPARSE_THRESHOLD = 3
@@ -68,6 +81,19 @@ SPARSE_THRESHOLD = 3
 
 def normalize_role(platform_role: str) -> str:
     return ROLE_MAP.get(platform_role, platform_role.removeprefix("AX").lower())
+
+
+def ops_of(role: str, actions: tuple[str, ...], value_settable: bool) -> tuple[str, ...]:
+    """Each element is offered only the operations it actually supports.
+
+    A checkbox is never offered as a place to type; a button that does not
+    publish a press action is not offered `press`. Order is fixed so the same
+    element renders identically every step (prompt caching, §8.1).
+    """
+    found = {ACTION_MAP[a] for a in actions if a in ACTION_MAP}
+    if value_settable and role in TEXT_ROLES:
+        found.add("type")
+    return tuple(op for op in ("press", "type", "menu") if op in found)
 
 
 def _keep(role: str, name: str, bbox: tuple[int, int, int, int] | None, enabled: bool) -> bool:
@@ -97,6 +123,7 @@ def _reading_order(items: list[tuple[str, str, tuple[int, int, int, int]]]):
 
 def to_elements(nodes: list[RawNode], *, app: str = "") -> list[Element]:
     kept: list[tuple[str, str, tuple[int, int, int, int]]] = []
+    extra: dict[tuple[int, int, int, int], tuple[tuple[str, ...], str]] = {}
     seen: set[tuple[int, int, int, int]] = set()
 
     for n in nodes:
@@ -109,9 +136,11 @@ def to_elements(nodes: list[RawNode], *, app: str = "") -> list[Element]:
             continue
         seen.add(n.bbox)
         kept.append((role, n.name, n.bbox))
+        extra[n.bbox] = (ops_of(role, n.actions, n.value_settable), n.path)
 
     elements = [
-        Element(id=i, role=role, name=name, bbox=bbox)
+        Element(id=i, role=role, name=name, bbox=bbox,
+                ops=extra[bbox][0], path=extra[bbox][1])
         for i, (role, name, bbox) in enumerate(_reading_order(kept))
     ]
 
@@ -152,3 +181,50 @@ def screen_fingerprint(elements: list[Element]) -> str:
     """
     blob = "|".join(e.key() for e in elements)
     return hashlib.sha1(blob.encode()).hexdigest()[:12]
+
+
+# --------------------------------------------------------------------------
+# Menu bar -> addressable commands (CLAUDE.md §4.11, MENU_ACTIONS=on)
+# --------------------------------------------------------------------------
+MENU_CAP = 80  # enters the prompt, so FIXED-size (§5.2)
+
+# Titles that flip with state ("Show Ruler" <-> "Hide Ruler"). Menu titles do
+# not revalidate reliably after a command (stale for >=2 s in the reference
+# repo's testing), so a state-dependent title may name the command that is NOT
+# there any more. Offer only titles that mean the same thing every time.
+_FLIP_PREFIXES = ("show ", "hide ", "enable ", "disable ", "turn on ", "turn off ")
+
+# Never offered, whatever the app calls it: fullscreen moves the app to its own
+# Space and the agent goes blind to everything else (§5.3).
+_FORBIDDEN = ("full screen", "fullscreen")
+
+# The Apple menu acts on the MACHINE (Restart, Shut Down, Log Out, System
+# Settings), never on the app under test.
+_SKIP_TOP = {"apple"}
+
+
+def to_menu(nodes: list[RawNode]) -> list[MenuCommand]:
+    """Raw menu items -> numbered commands. PLATFORM-NEUTRAL.
+
+    The adapter names each item by its full title path ("Format > Font >
+    Bold") and gives it an opaque handle; everything else is decided here.
+    """
+    out: list[MenuCommand] = []
+    seen: set[str] = set()
+    for n in nodes:
+        title = n.name.strip()
+        if not title or title in seen:
+            continue
+        parts = [p.strip() for p in title.split(">")]
+        leaf = parts[-1].lower()
+        if parts[0].lower() in _SKIP_TOP or len(parts) < 2:
+            continue
+        if any(f in leaf for f in _FORBIDDEN):
+            continue
+        if leaf.startswith(_FLIP_PREFIXES):
+            continue
+        seen.add(title)
+        out.append(MenuCommand(id=len(out), title=title, path=n.path, enabled=n.enabled))
+        if len(out) >= MENU_CAP:
+            break
+    return out

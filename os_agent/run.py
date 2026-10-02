@@ -11,6 +11,7 @@ callables built here differ.
 import argparse
 import asyncio
 import base64
+import dataclasses
 import sys
 import time
 
@@ -22,7 +23,12 @@ from os_agent.agent.graph import (
     terminal_reason,
 )
 from os_agent.agent.nodes import Planner, Verifier
-from os_agent.agent.prompts import REFLECT_SYSTEM, SYSTEM, build_reflect_user, build_user
+from os_agent.agent.prompts import (
+    REFLECT_SYSTEM,
+    build_reflect_user,
+    build_user,
+    system_prompt,
+)
 from os_agent.agent.state import AgentState, initial_state
 from os_agent.config import settings
 from os_agent.desktop.macos import MacOSAdapter
@@ -31,7 +37,14 @@ from os_agent.llm.litellm_client import LiteLLMClient
 from os_agent.telemetry.log import configure
 from os_agent.telemetry.tracer import CallRecord, Tracer
 from os_agent.telemetry.trajectory import StepRecord, TrajectoryWriter, target_of
-from os_agent.types import Action, Expectation, Observation, PlannedAction, Reflection
+from os_agent.types import (
+    Action,
+    Expectation,
+    FanOutPlan,
+    Observation,
+    PlannedAction,
+    Reflection,
+)
 from os_agent.verify.cheap import check
 
 log = structlog.get_logger(__name__)
@@ -47,6 +60,12 @@ def make_planner(client: LiteLLMClient, tracer: Tracer, traj=None, adapter=None)
     and §4.7 entirely. A trajectory has to be written as it happens.
     """
 
+    # Chosen once per run: the system prompt stays byte-identical across calls.
+    system = system_prompt(exec_mode=settings.exec_mode,
+                           menu_actions=settings.menu_actions,
+                           plan_schema=settings.plan_schema)
+    schema = FanOutPlan if settings.plan_schema == "fanout" else PlannedAction
+
     async def plan(state: AgentState):
         user = build_user(state, screen=adapter.screen_size_points())
         image = base64.b64decode(state.get("screenshot_b64") or "")
@@ -54,10 +73,10 @@ def make_planner(client: LiteLLMClient, tracer: Tracer, traj=None, adapter=None)
         try:
             result = await asyncio.to_thread(
                 client.plan,
-                system=SYSTEM,
+                system=system,
                 text=user,
                 image_png=image,
-                schema=PlannedAction,
+                schema=schema,
                 extra=settings.planner_extra(),
             )
         except Exception as exc:
@@ -79,6 +98,13 @@ def make_planner(client: LiteLLMClient, tracer: Tracer, traj=None, adapter=None)
             cost_usd=result.cost_usd, repairs=result.repairs,
             attempts=result.raw.get("attempts", 1), ok=True,
         ))
+
+        heads = None
+        if isinstance(result.parsed, FanOutPlan):
+            # Only the head matching `operation` executes. The others are kept
+            # in the trajectory: they are what speculation would train on.
+            heads = result.parsed.model_dump(exclude={"reasoning", "subgoal", "expect"})
+            result = dataclasses.replace(result, parsed=result.parsed.to_planned())
 
         if traj is not None:
             planned = result.parsed
@@ -103,6 +129,7 @@ def make_planner(client: LiteLLMClient, tracer: Tracer, traj=None, adapter=None)
                 cost_usd=result.cost_usd, repairs=result.repairs,
                 facts=list(state.get("facts") or []),
                 reflection_note=state.get("reflection_note", ""),
+                fanout=heads,
             ))
         return result
 
@@ -182,7 +209,13 @@ async def run_task(goal: str, task_id: str, *, yolo: bool, max_steps: int | None
     configure(pretty=True)
     tracer = Tracer()
     client = LiteLLMClient(settings.planner)
-    traj = TrajectoryWriter(task_id, goal, client.model, client.provider)
+    # Which ablation row this run belongs to. A run without these is unlabelled
+    # and cannot go in the table (§4.11).
+    traj = TrajectoryWriter(task_id, goal, client.model, client.provider, extra={
+        "exec_mode": settings.exec_mode, "menu_actions": settings.menu_actions,
+        "plan_schema": settings.plan_schema, "ax_max_depth": settings.ax_max_depth,
+        "risk_approval": settings.risk_approval,
+    })
     adapter = MacOSAdapter()
 
     # -- PREFLIGHT (§5.3, §13) ---------------------------------------------
@@ -261,6 +294,9 @@ async def run_task(goal: str, task_id: str, *, yolo: bool, max_steps: int | None
 
     print("\n" + "=" * 68)
     print(f"  task            : {task_id}")
+    print(f"  exec mode       : {settings.exec_mode}"
+          f"{'  +menu' if settings.menu_actions else ''}"
+          f"{'  +fanout' if settings.plan_schema == 'fanout' else ''}")
     print(f"  terminal reason : {terminal_reason(final)}")
     if score is not None:
         print(f"  checker         : {score}")

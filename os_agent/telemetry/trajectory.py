@@ -51,6 +51,9 @@ class StepRecord:
     facts: list[str] = field(default_factory=list)
     reflection_note: str = ""
     screenshot: str = ""  # a path, never the bytes
+    # PLAN_SCHEMA=fanout: every head the model filled, including the ones that
+    # did not execute — what it would have done otherwise.
+    fanout: dict | None = None
 
 
 def target_of(action: Action | None, elements: list[Element]) -> dict | None:
@@ -74,14 +77,15 @@ def _plain(obj) -> dict | None:
 class TrajectoryWriter:
     """One directory per run: runs/<timestamp>/<task_id>/."""
 
-    def __init__(self, task_id: str, goal: str, model: str, provider: str) -> None:
+    def __init__(self, task_id: str, goal: str, model: str, provider: str,
+                 extra: dict | None = None) -> None:
         stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
         self.dir = RUNS / stamp / task_id
         self.frames = self.dir / "frames"
         self.frames.mkdir(parents=True, exist_ok=True)
         self.meta = {
             "task_id": task_id, "goal": goal, "model": model, "provider": provider,
-            "started_at": stamp,
+            "started_at": stamp, **(extra or {}),
         }
         self.steps: list[StepRecord] = []
         # Written up front so a killed run still says what it was trying.

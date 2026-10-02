@@ -86,6 +86,7 @@ def make_nodes(
             "screenshot_b64": base64.b64encode(obs.annotated).decode(),
             "screenshot_plain_b64": base64.b64encode(obs.screenshot).decode(),
             "screen_hash": obs.meta.get("screen_hash", ""),
+            "menu": obs.menu,
             "obs_fresh": False,
             "perception_ms": (time.perf_counter() - t0) * 1000,
         }
@@ -185,6 +186,7 @@ def make_nodes(
             "screenshot_b64": base64.b64encode(obs.annotated).decode(),
             "screenshot_plain_b64": base64.b64encode(obs.screenshot).decode(),
             "screen_hash": obs.meta.get("screen_hash", ""),
+            "menu": obs.menu,
             "obs_fresh": True,
             "executor_error": "",  # consumed; never carried into the next step
         }

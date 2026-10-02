@@ -115,6 +115,27 @@ class Settings:
     platform: str = field(default_factory=lambda: _env("PLATFORM", "macos"))
     approval: bool = field(default_factory=lambda: _env("APPROVAL", "on").lower() != "off")
 
+    # -- execution path (CLAUDE.md §4.11) -----------------------------------
+    # synthetic: real mouse + keyboard events. THE BENCHMARK PATH — computer use.
+    # ax:        AXPress / AXValue straight into the target process. A separate,
+    #            labelled ablation row; never mixed into the baseline number.
+    exec_mode: str = field(default_factory=lambda: _env("EXEC_MODE", "synthetic"))
+    # Menu-bar commands as addressable [mN] items. Needs EXEC_MODE=ax.
+    menu_actions: bool = field(
+        default_factory=lambda: _env("MENU_ACTIONS", "off").lower() == "on"
+    )
+    # single: PlannedAction. fanout: FanOutPlan, one head per operation.
+    plan_schema: str = field(default_factory=lambda: _env("PLAN_SCHEMA", "single"))
+    # Planner risk ratings at or above this need a human, --yolo or not.
+    # "off" disables the gate. IRREVERSIBLE applies regardless (§8.6).
+    risk_approval: str = field(default_factory=lambda: _env("RISK_APPROVAL", "high"))
+
+    # -- perception (CLAUDE.md §8.2) ----------------------------------------
+    # Was 20. Chromium puts the web area ~9 levels under the window and the UI
+    # another 10-20 below that, so depth 20 may be why Electron looked empty.
+    # UNMEASURED HERE — scripts/ax_depth.py records old vs new per app.
+    ax_max_depth: int = field(default_factory=lambda: _env_i("AX_MAX_DEPTH", 60))
+
     @property
     def sandbox(self) -> Path:
         """Every file the agent touches lives under here (CLAUDE.md §8.6)."""
@@ -143,4 +164,22 @@ class Settings:
         return {}
 
 
+EXEC_MODES = ("synthetic", "ax")
+PLAN_SCHEMAS = ("single", "fanout")
+
+
+def validate(s: "Settings") -> None:
+    """Typos in .env must fail loudly: EXEC_MODE=AX silently running the
+    synthetic path would put a mislabelled row in the ablation table."""
+    if s.exec_mode not in EXEC_MODES:
+        raise ValueError(f"EXEC_MODE={s.exec_mode!r}; expected one of {EXEC_MODES}")
+    if s.plan_schema not in PLAN_SCHEMAS:
+        raise ValueError(f"PLAN_SCHEMA={s.plan_schema!r}; expected one of {PLAN_SCHEMAS}")
+    if s.risk_approval not in ("low", "medium", "high", "off"):
+        raise ValueError(f"RISK_APPROVAL={s.risk_approval!r}; expected low|medium|high|off")
+    if s.menu_actions and s.exec_mode != "ax":
+        raise ValueError("MENU_ACTIONS=on needs EXEC_MODE=ax: a closed menu cannot be clicked")
+
+
 settings = Settings()
+validate(settings)
