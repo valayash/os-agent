@@ -12,11 +12,14 @@ import argparse
 import asyncio
 import base64
 import dataclasses
+import json
+import os
 import sys
 import time
 
 import structlog
 
+from os_agent.agent import choice
 from os_agent.agent.graph import (
     RecursionLimitReached,
     build_graph,
@@ -31,9 +34,11 @@ from os_agent.agent.prompts import (
 )
 from os_agent.agent.state import AgentState, initial_state
 from os_agent.config import settings
-from os_agent.desktop.macos import MacOSAdapter
 from os_agent.env.desktop_env import DesktopEnv
+from os_agent.llm.base import LLMResult
+from os_agent.llm.jev_client import JevAnswers, JevClient
 from os_agent.llm.litellm_client import LiteLLMClient
+from os_agent.perception.elements import SPARSE_THRESHOLD
 from os_agent.telemetry.log import configure
 from os_agent.telemetry.tracer import CallRecord, Tracer
 from os_agent.telemetry.trajectory import StepRecord, TrajectoryWriter, target_of
@@ -44,10 +49,144 @@ from os_agent.types import (
     Observation,
     PlannedAction,
     Reflection,
+    TextValue,
 )
 from os_agent.verify.cheap import check
 
 log = structlog.get_logger(__name__)
+
+
+def _record_call(tracer: Tracer, node: str, step: int, result: LLMResult) -> None:
+    tracer.record(CallRecord(
+        node=node, step=step, model=result.model,
+        provider=result.provider, latency_ms=result.latency_ms,
+        provider_wait_ms=result.provider_wait_ms,
+        prompt_tokens=result.prompt_tokens,
+        completion_tokens=result.completion_tokens,
+        cost_usd=result.cost_usd, repairs=result.repairs,
+        attempts=result.raw.get("attempts", 1), ok=True,
+    ))
+
+
+def _record_failure(tracer: Tracer, node: str, step: int, client, t0: float,
+                    exc: Exception) -> None:
+    tracer.record(CallRecord(
+        node=node, step=step, model=client.model, provider=client.provider,
+        latency_ms=(time.perf_counter() - t0) * 1000,
+        provider_wait_ms=0.0, prompt_tokens=0, completion_tokens=0,
+        cost_usd=0.0, repairs=0, attempts=1, ok=False,
+        error=f"{type(exc).__name__}: {exc}"[:200],
+    ))
+
+
+def make_choice_planner(jev: JevClient, text_client: LiteLLMClient, fallback: Planner,
+                        tracer: Tracer, traj=None) -> Planner:
+    """The decision as a CHOICE (§19): Jev answers named questions.
+
+    Three routes, decided per step:
+      sparse screen   -> `fallback`, the vision planner. Jev takes text only,
+                         and a window that cannot be described in text has to
+                         be shown as a picture.
+      typing step     -> Jev, then ONE text-model call for the words. Two calls,
+                         counted as two.
+      everything else -> Jev alone. One call.
+    """
+
+    async def plan(state: AgentState):
+        els = state.get("elements") or []
+        if len(els) < SPARSE_THRESHOLD:
+            log.info("choice.fallback", step=state["step"], elements=len(els),
+                     why="too sparse to describe in text; using the vision planner")
+            return await fallback(state)
+
+        req = choice.build_request(state, exec_mode=settings.exec_mode,
+                                   menu_actions=settings.menu_actions)
+        t0 = time.perf_counter()
+        try:
+            result = await asyncio.to_thread(
+                jev.plan, system="", text=json.dumps(req.state, ensure_ascii=False),
+                image_png=b"", schema=JevAnswers, extra={"questions": req.questions},
+            )
+        except Exception as exc:
+            _record_failure(tracer, "plan", state["step"], jev, t0, exc)
+            raise
+        _record_call(tracer, "plan", state["step"], result)
+        planned, needs_text, trace = choice.decode(result.parsed.answers, req, elements=els)
+
+        parts = [result]
+        if needs_text:
+            ctx = {
+                "goal": state["goal"],
+                "app": state.get("app") or "unknown",
+                "operation": planned.action.kind,
+                "target": next((choice.label(e) for e in els
+                                if e.id == planned.action.element_id), "the focused field"),
+                "elements": [choice.label(e) for e in els[:40]],
+                "facts": list(state.get("facts") or []),
+            }
+            t1 = time.perf_counter()
+            try:
+                text_result = await asyncio.to_thread(
+                    text_client.plan, system=choice.TEXT_VALUE,
+                    text=json.dumps(ctx, ensure_ascii=False), image_png=b"",
+                    schema=TextValue, extra=settings.extra_for(text_client.model),
+                )
+            except Exception as exc:
+                _record_failure(tracer, "text", state["step"], text_client, t1, exc)
+                raise
+            _record_call(tracer, "text", state["step"], text_result)
+            planned = choice.with_text(planned, text_result.parsed.text, els)
+            parts.append(text_result)
+
+        combined = LLMResult(
+            parsed=planned,
+            prompt_tokens=sum(p.prompt_tokens for p in parts),
+            completion_tokens=sum(p.completion_tokens for p in parts),
+            latency_ms=sum(p.latency_ms for p in parts),
+            provider_wait_ms=sum(p.provider_wait_ms for p in parts),
+            cost_usd=sum(p.cost_usd for p in parts),
+            repairs=sum(p.repairs for p in parts),
+            model=result.model, provider=result.provider,
+            raw={"calls": len(parts), "attempts": result.raw.get("attempts", 1)},
+        )
+        log.info("choice", step=state["step"], operation=planned.action.kind,
+                 confidence=round(planned.confidence, 3), risk=planned.action.risk,
+                 calls=len(parts))
+        _record_step(traj, state, combined, choice=trace)
+        return combined
+
+    return plan
+
+
+def _record_step(traj, state: AgentState, result: LLMResult, *, fanout=None,
+                 choice=None) -> None:
+    """One trajectory row, written while the action and its elements are in hand."""
+    if traj is None:
+        return
+    planned = result.parsed
+    els = state.get("elements") or []
+    traj.add(StepRecord(
+        step=state["step"],
+        app=state.get("app", ""), bundle_id=state.get("bundle_id", ""),
+        subgoal=planned.subgoal, reasoning=planned.reasoning,
+        action=planned.action.__dict__.copy(),
+        # §4.7 — the stable key, so this step survives id renumbering
+        action_target=target_of(planned.action, els),
+        expect=planned.expect.model_dump(),
+        # the outcome of the PREVIOUS step; this one has not run yet
+        outcome=state.get("last_outcome", ""),
+        reason=state.get("last_reason", ""),
+        elements=len(els),
+        perception_ms=state.get("perception_ms", 0.0),
+        llm_latency_ms=result.latency_ms,
+        provider_wait_ms=result.provider_wait_ms,
+        prompt_tokens=result.prompt_tokens,
+        completion_tokens=result.completion_tokens,
+        cost_usd=result.cost_usd, repairs=result.repairs,
+        facts=list(state.get("facts") or []),
+        reflection_note=state.get("reflection_note", ""),
+        fanout=fanout, choice=choice,
+    ))
 
 
 def make_planner(client: LiteLLMClient, tracer: Tracer, traj=None, adapter=None) -> Planner:
@@ -80,24 +219,9 @@ def make_planner(client: LiteLLMClient, tracer: Tracer, traj=None, adapter=None)
                 extra=settings.planner_extra(),
             )
         except Exception as exc:
-            tracer.record(CallRecord(
-                node="plan", step=state["step"], model=client.model,
-                provider=client.provider,
-                latency_ms=(time.perf_counter() - t0) * 1000,
-                provider_wait_ms=0.0, prompt_tokens=0, completion_tokens=0,
-                cost_usd=0.0, repairs=0, attempts=1, ok=False,
-                error=f"{type(exc).__name__}: {exc}"[:200],
-            ))
+            _record_failure(tracer, "plan", state["step"], client, t0, exc)
             raise
-        tracer.record(CallRecord(
-            node="plan", step=state["step"], model=result.model,
-            provider=result.provider, latency_ms=result.latency_ms,
-            provider_wait_ms=result.provider_wait_ms,
-            prompt_tokens=result.prompt_tokens,
-            completion_tokens=result.completion_tokens,
-            cost_usd=result.cost_usd, repairs=result.repairs,
-            attempts=result.raw.get("attempts", 1), ok=True,
-        ))
+        _record_call(tracer, "plan", state["step"], result)
 
         heads = None
         if isinstance(result.parsed, FanOutPlan):
@@ -106,31 +230,7 @@ def make_planner(client: LiteLLMClient, tracer: Tracer, traj=None, adapter=None)
             heads = result.parsed.model_dump(exclude={"reasoning", "subgoal", "expect"})
             result = dataclasses.replace(result, parsed=result.parsed.to_planned())
 
-        if traj is not None:
-            planned = result.parsed
-            els = state.get("elements") or []
-            traj.add(StepRecord(
-                step=state["step"],
-                app=state.get("app", ""), bundle_id=state.get("bundle_id", ""),
-                subgoal=planned.subgoal, reasoning=planned.reasoning,
-                action=planned.action.__dict__.copy(),
-                # §4.7 — the stable key, so this step survives id renumbering
-                action_target=target_of(planned.action, els),
-                expect=planned.expect.model_dump(),
-                # the outcome of the PREVIOUS step; this one has not run yet
-                outcome=state.get("last_outcome", ""),
-                reason=state.get("last_reason", ""),
-                elements=len(els),
-                perception_ms=state.get("perception_ms", 0.0),
-                llm_latency_ms=result.latency_ms,
-                provider_wait_ms=result.provider_wait_ms,
-                prompt_tokens=result.prompt_tokens,
-                completion_tokens=result.completion_tokens,
-                cost_usd=result.cost_usd, repairs=result.repairs,
-                facts=list(state.get("facts") or []),
-                reflection_note=state.get("reflection_note", ""),
-                fanout=heads,
-            ))
+        _record_step(traj, state, result, fanout=heads)
         return result
 
     return plan
@@ -151,7 +251,7 @@ def make_reflector(client: LiteLLMClient, tracer: Tracer):
             text=build_reflect_user(state),
             image_png=base64.b64decode(state.get("screenshot_b64") or ""),
             schema=Reflection,
-            extra=settings.planner_extra(),
+            extra=settings.extra_for(client.model),
         )
         tracer.record(CallRecord(
             node="reflect", step=state["step"], model=result.model,
@@ -207,8 +307,21 @@ def approve_at_terminal(action: Action, verdict) -> bool:
 async def run_task(goal: str, task_id: str, *, yolo: bool, max_steps: int | None = None,
                    app_name: str | None = None):
     configure(pretty=True)
+    # Imported here, not at module top, so the planners above can be imported
+    # and tested on a machine without pyobjc.
+    from os_agent.desktop.macos import MacOSAdapter
+
     tracer = Tracer()
-    client = LiteLLMClient(settings.planner)
+    # A choice backend (Jev) cannot write: the words it types and the
+    # reflection advice come from MODEL_SMALL, and so does the vision fallback
+    # for screens too sparse to describe in text (§19).
+    if settings.planner_is_choice:
+        if not os.getenv("JEV_API_KEY"):
+            raise SystemExit("MODEL_PLANNER is a Jev model but JEV_API_KEY is not set.")
+        client = JevClient(settings.planner)
+        writer = LiteLLMClient(settings.small)
+    else:
+        client = writer = LiteLLMClient(settings.planner)
     # Which ablation row this run belongs to. A run without these is unlabelled
     # and cannot go in the table (§4.11).
     traj = TrajectoryWriter(task_id, goal, client.model, client.provider, extra={
@@ -255,11 +368,14 @@ async def run_task(goal: str, task_id: str, *, yolo: bool, max_steps: int | None
         approve=approve_at_terminal,
         approval_on=settings.approval and not yolo,
     )
+    planner = make_planner(writer, tracer, traj, adapter)
+    if settings.planner_is_choice:
+        planner = make_choice_planner(client, writer, planner, tracer, traj)
     app = build_graph(
         env,
-        make_planner(client, tracer, traj, adapter),
+        planner,
         make_verifier(),
-        make_reflector(client, tracer),
+        make_reflector(writer, tracer),
         approval=False,
     )
 
