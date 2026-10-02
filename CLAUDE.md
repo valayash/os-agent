@@ -327,6 +327,7 @@ os-agent/
 │   ├── llm/                    # SEAM #2 — any provider
 │   │   ├── base.py             # LLMClient protocol
 │   │   ├── litellm_client.py   # default: one call signature over ~100 providers
+│   │   ├── jev_client.py       # Jev: named questions -> choices (§19)
 │   │   └── schema.py           # structured output + single repair retry
 │   │
 │   ├── env/                    # SEAM #1 — task-level contract
@@ -356,7 +357,8 @@ os-agent/
 │   │   ├── graph.py            # LangGraph assembly
 │   │   ├── nodes.py            # observe / plan / execute / verify / reflect
 │   │   ├── state.py            # AgentState TypedDict
-│   │   └── prompts.py          # prompt builders (rebuilt, never appended)
+│   │   ├── prompts.py          # prompt builders (rebuilt, never appended)
+│   │   └── choice.py           # Jev questions out, PlannedAction back (§19)
 │   │
 │   ├── memory/                 # Phase B — stubs only in Phase A
 │   │   ├── trajectory_store.py
@@ -1190,6 +1192,10 @@ MENU_ACTIONS=off            # on: menu commands as [mN]; needs EXEC_MODE=ax
 PLAN_SCHEMA=single          # single | fanout
 RISK_APPROVAL=high          # planner risk >= this needs a human, even with --yolo
 AX_MAX_DEPTH=60             # was 20 at A2
+
+# ---- Jev choice backend (§19) — MODEL_PLANNER=jev/jev-latest to opt in ----
+JEV_API_KEY=
+JEV_BASE_URL=https://api.typesafe.ai/v1
 ```
 
 Prices live in `config.COST_TABLE`, not here — the tracer needs them, and Gemini 3.x Flash
@@ -1837,6 +1843,7 @@ long-lived bridge (one traversal per step, no process launch) — step 7 below, 
 | 4 | menu action space, `[mN]` | **built**, `MENU_ACTIONS=on` |
 | 5 | background test — does AX action take focus? | **script written**, `scripts/ax_background.py`. NOT RUN |
 | 6 | fan-out schema + `risk` into approval | **built**, `PLAN_SCHEMA=fanout`; `risk` gate always on |
+| — | Jev choice backend: decision as named questions with distributions | **built**, `MODEL_PLANNER=jev/…`. NOT CALLED LIVE |
 | 7 | persistent bridge | **deferred**: 77 ms against a ~900–4,000 ms decision is not the bottleneck |
 
 Steps 1–2 change the BASELINE path (deeper walk, ops in the prompt) and belong before A6:
@@ -1878,10 +1885,51 @@ platform-neutral logic with a fake adapter, and nothing about macOS.
   as §12's `thinking_level` finding.
 - **An editable field is not always a place to write prose** — see the rename rule in §8.6.
 
+### The Jev backend — the decision as a choice, not as writing
+
+Every other planner here asks a model to WRITE a `PlannedAction` as JSON. **Jev**
+(TypeSafe's "System One" model, the one jev-ultrafast runs on) answers NAMED QUESTIONS:
+`POST {JEV_BASE_URL}/systemone` with `{model, state, questions}`, and each answer is a
+choice from the offered set — or a score — with a probability distribution. Nothing is
+written, so nothing is malformed (`schema_repair_rate` is structurally 0), and confidence
+is measured rather than self-reported: the first real use `PlannedAction.confidence` has
+had (§4.3).
+
+Opt in with `MODEL_PLANNER=jev/jev-latest` + `JEV_API_KEY`. Files: `agent/choice.py`
+(questions out, `PlannedAction` back — pure, tested) and `llm/jev_client.py` (HTTP, behind
+the `LLMClient` seam; questions travel in `extra`, which is what it is for).
+
+Questions asked per step: `operation` (click · type · set_value · menu · key · scroll ·
+wait · done · fail, only those with candidates) · one `<op>_target` per targeted operation
+· `risk`, a score over three ordered levels that maps onto `Action.risk`. Keys are a fixed
+choice list (`enter`, `cmd+s`, …) since nothing can write a key name; `cmd+q` / `cmd+w`
+are not offered.
+
+What a model that cannot write cannot give, and what fills it:
+
+| gap | filled by | cost |
+|---|---|---|
+| the words to type | `MODEL_SMALL`, ONLY on steps whose operation types | **a 2nd LLM call on those steps, counted** — `llm_calls_per_step` rises above 1.0 by the typing fraction, and that is reported, not hidden |
+| `expect` | derived from the action: `text_in_element` for typing, `screen_changed` otherwise | weaker verification than a prediction for clicks |
+| reflection advice | `MODEL_SMALL` | as before |
+| a screen too sparse to describe (< 3 elements) | the vision planner on `MODEL_SMALL` | Jev takes text only |
+
+An operation outside the offered set raises and nothing runs; a target outside its set
+becomes `element_id=None`, which policy refuses as a recoverable error.
+
+**Their numbers, unmeasured here** (Calculator, 8 runs each, same machine): jev 490 ms
+median decision vs 2,268 ms for deepseek-flash via OpenRouter, identical 8/8 accuracy —
+and they say most of that 4.6× is the gateway; against the vendor's own API the honest
+figure is ~1.5×. **Pricing is unknown**: `jev/jev-latest` sits in `UNVERIFIED_PRICING` at a
+placeholder Flash-class price so the budget still binds, and if the response carries no
+token usage, recorded cost is 0 and only the step cap bounds spend. **No request has been
+made to the live API from this repo** — the request shape is the reference repo's.
+
 ### Ablation rows this produces
 
-`baseline` · `+ AX execution` · `+ menu action space` · `+ fan-out` — each a separate
-`.env` change, each labelled in `meta.json`. Capability filtering and the depth cap are in
+`baseline` · `+ AX execution` · `+ menu action space` · `+ fan-out` · **`choice backend
+(Jev) vs generative planner`** — each a separate `.env` change, each labelled in
+`meta.json`. Capability filtering and the depth cap are in
 the baseline itself.
 
 ### Messaging apps are deliberately NOT a benchmark task

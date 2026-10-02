@@ -217,6 +217,18 @@ class Reflection(BaseModel):
     )
 
 
+class TextValue(BaseModel):
+    """The one thing a choice backend cannot produce: the words to type.
+
+    Asked of a small text model ONLY on steps whose chosen operation types, and
+    counted as the extra LLM call it is (CLAUDE.md §19).
+    """
+
+    text: str | None = Field(
+        description="The exact string to type, or null if the goal does not determine one."
+    )
+
+
 class PlannedAction(BaseModel):
     """The planner's entire output. One call per step produces all of this."""
 

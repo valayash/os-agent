@@ -39,6 +39,11 @@ COST_TABLE: dict[str, tuple[float, float]] = {
     "groq/qwen/qwen3.8-27b": (0.30, 0.60),
     "groq/openai/gpt-oss-120b": (0.15, 0.60),
     "groq/openai/gpt-oss-20b": (0.10, 0.40),
+    # --- Jev (TypeSafe System One). PLACEHOLDER, priced like a Flash-class ---
+    # model so the task budget still binds. Its real pricing — and whether it
+    # even bills per token — is unknown; if the response carries no token
+    # usage, the cost recorded is 0 and ONLY the step cap bounds spend.
+    "jev/jev-latest": (0.75, 3.75),
 }
 
 # Prices we have NOT confirmed against the provider's own published table.
@@ -54,6 +59,7 @@ UNVERIFIED_PRICING: set[str] = {
     "groq/qwen/qwen3.8-27b",
     "groq/openai/gpt-oss-120b",
     "groq/openai/gpt-oss-20b",
+    "jev/jev-latest",
 }
 
 
@@ -130,6 +136,12 @@ class Settings:
     # "off" disables the gate. IRREVERSIBLE applies regardless (§8.6).
     risk_approval: str = field(default_factory=lambda: _env("RISK_APPROVAL", "high"))
 
+    # -- Jev backend (CLAUDE.md §19). Selected by MODEL_PLANNER=jev/<model>.
+    # The key itself is read where it is used (JEV_API_KEY), never stored here.
+    jev_base_url: str = field(
+        default_factory=lambda: _env("JEV_BASE_URL", "https://api.typesafe.ai/v1")
+    )
+
     # -- perception (CLAUDE.md §8.2) ----------------------------------------
     # Was 20. Chromium puts the web area ~9 levels under the window and the UI
     # another 10-20 below that, so depth 20 may be why Electron looked empty.
@@ -140,6 +152,11 @@ class Settings:
     def sandbox(self) -> Path:
         """Every file the agent touches lives under here (CLAUDE.md §8.6)."""
         return Path(_env("SANDBOX_DIR", "~/os-agent-sandbox")).expanduser()
+
+    @property
+    def planner_is_choice(self) -> bool:
+        """A choice backend answers questions; it does not write a PlannedAction."""
+        return self.planner.startswith("jev/")
 
     def planner_extra(self) -> dict:
         """Provider-specific knobs. Passed through LLMClient, never abstracted.
@@ -154,12 +171,17 @@ class Settings:
         which is a good argument for sending one real request before building
         five files on top of an assumption.
         """
-        if self.planner.startswith("gemini/"):
+        return self.extra_for(self.planner)
+
+    def extra_for(self, model: str) -> dict:
+        """planner_extra() for any model — the choice backend's text and
+        fallback calls go to MODEL_SMALL, which needs its own knobs."""
+        if model.startswith("gemini/"):
             return {
                 "thinking_level": self.thinking_level,
                 "media_resolution": f"MEDIA_RESOLUTION_{self.media_resolution.upper()}",
             }
-        if self.planner.startswith("anthropic/"):
+        if model.startswith("anthropic/"):
             return {"effort": self.thinking_level}
         return {}
 

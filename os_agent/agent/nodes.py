@@ -113,7 +113,10 @@ def make_nodes(
             "reasoning": planned.reasoning,
             "last_action": planned.action,
             "last_expect": planned.expect,
-            "llm_calls": state["llm_calls"] + 1,
+            # Usually 1. The choice backend makes a SECOND call on steps that
+            # type (the text it cannot write) and says so here — counting it
+            # as one would flatter the number the project is judged on (§1).
+            "llm_calls": state["llm_calls"] + result.raw.get("calls", 1),
             "cost_usd": state["cost_usd"] + result.cost_usd,
             "facts": push_fact(state["facts"], planned.new_fact),
         }
