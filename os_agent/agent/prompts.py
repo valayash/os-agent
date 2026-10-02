@@ -75,16 +75,7 @@ MENU COMMANDS are listed as [mN] under MENU. Invoke one in a single step with
   menu       element_id = N  (the number after m)
 This is cheaper than clicking a menu open and then clicking the item."""
 
-FANOUT_ADDENDUM = """
-
-REPLY SHAPE: choose `operation`, then fill the head that operation uses —
-click_target, type_value (+ set_target for set_value), menu_target, keys,
-scroll_target + amount. Fill other heads too if you know what they would be.
-risk: high if the action deletes, sends, overwrites or cannot be undone."""
-
-
-def system_prompt(*, exec_mode: str = "synthetic", menu_actions: bool = False,
-                  plan_schema: str = "single") -> str:
+def system_prompt(*, exec_mode: str = "synthetic", menu_actions: bool = False) -> str:
     """SYSTEM plus the addenda this run's configuration needs.
 
     With the defaults it returns SYSTEM unchanged, so the baseline prompt is
@@ -95,8 +86,6 @@ def system_prompt(*, exec_mode: str = "synthetic", menu_actions: bool = False,
         out += AX_ADDENDUM
     if menu_actions:
         out += MENU_ADDENDUM
-    if plan_schema == "fanout":
-        out += FANOUT_ADDENDUM
     return out
 
 
@@ -224,7 +213,3 @@ def build_user(state: AgentState, screen: tuple[int, int] | None = None) -> str:
     parts.append(f"\nSTEP {state['step'] + 1}. Choose one action.")
     return "\n".join(parts)
 
-
-def estimate_tokens(text: str) -> int:
-    """Rough, for budget logging only. ~4 chars per token."""
-    return len(text) // 4

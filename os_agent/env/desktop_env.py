@@ -99,7 +99,7 @@ class DesktopEnv(Environment):
         )
 
     def _safe_tree(self) -> list:
-        """A2 is not built yet. Say so in meta rather than crashing the gate."""
+        """An adapter without a tree walk yields no elements rather than a crash."""
         try:
             return self.adapter.raw_tree()
         except NotOnThisPlatform:

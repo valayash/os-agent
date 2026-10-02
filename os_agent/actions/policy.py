@@ -91,9 +91,6 @@ class Verdict:
     # the guardrails will never permit. Only the second kind ends a run.
     recoverable: bool = False
 
-    def __bool__(self) -> bool:  # `if policy.check(...):`
-        return self.allowed
-
 
 def irreversible_hit(label: str) -> str | None:
     """Return the matched term, or None.
@@ -142,6 +139,13 @@ def commits_outward(action: Action) -> str | None:
     return None
 
 
+# A text field's accessible name is its CONTENT, not a label. Matching it
+# against IRREVERSIBLE meant a document containing the word "send" or "delete"
+# made every click into it ask for approval — and a terminal prompt steals
+# focus from the app (A5), so the run then stalls.
+_CONTENT_ROLES = {"textfield", "textarea", "searchfield", "combobox"}
+
+
 def _target_label(action: Action, elements: list[Element],
                   menu: list[MenuCommand] | None = None) -> str:
     if action.element_id is None:
@@ -158,7 +162,7 @@ def _target_label(action: Action, elements: list[Element],
         return ""
     for el in elements:
         if el.id == action.element_id:
-            return el.name
+            return "" if el.role in _CONTENT_ROLES else el.name
     return ""
 
 

@@ -130,8 +130,6 @@ class Settings:
     menu_actions: bool = field(
         default_factory=lambda: _env("MENU_ACTIONS", "off").lower() == "on"
     )
-    # single: PlannedAction. fanout: FanOutPlan, one head per operation.
-    plan_schema: str = field(default_factory=lambda: _env("PLAN_SCHEMA", "single"))
     # Planner risk ratings at or above this need a human, --yolo or not.
     # "off" disables the gate. IRREVERSIBLE applies regardless (§8.6).
     risk_approval: str = field(default_factory=lambda: _env("RISK_APPROVAL", "high"))
@@ -158,8 +156,8 @@ class Settings:
         """A choice backend answers questions; it does not write a PlannedAction."""
         return self.planner.startswith("jev/")
 
-    def planner_extra(self) -> dict:
-        """Provider-specific knobs. Passed through LLMClient, never abstracted.
+    def extra_for(self, model: str) -> dict:
+        """Provider-specific knobs for `model`. Passed through LLMClient, never abstracted.
 
         MEASURED A4: Gemini rejects the friendly value. `media_resolution` wants
         the protobuf enum spelling — "MEDIA_RESOLUTION_MEDIUM", not "medium":
@@ -171,11 +169,6 @@ class Settings:
         which is a good argument for sending one real request before building
         five files on top of an assumption.
         """
-        return self.extra_for(self.planner)
-
-    def extra_for(self, model: str) -> dict:
-        """planner_extra() for any model — the choice backend's text and
-        fallback calls go to MODEL_SMALL, which needs its own knobs."""
         if model.startswith("gemini/"):
             return {
                 "thinking_level": self.thinking_level,
@@ -187,7 +180,6 @@ class Settings:
 
 
 EXEC_MODES = ("synthetic", "ax")
-PLAN_SCHEMAS = ("single", "fanout")
 
 
 def validate(s: "Settings") -> None:
@@ -195,8 +187,6 @@ def validate(s: "Settings") -> None:
     synthetic path would put a mislabelled row in the ablation table."""
     if s.exec_mode not in EXEC_MODES:
         raise ValueError(f"EXEC_MODE={s.exec_mode!r}; expected one of {EXEC_MODES}")
-    if s.plan_schema not in PLAN_SCHEMAS:
-        raise ValueError(f"PLAN_SCHEMA={s.plan_schema!r}; expected one of {PLAN_SCHEMAS}")
     if s.risk_approval not in ("low", "medium", "high", "off"):
         raise ValueError(f"RISK_APPROVAL={s.risk_approval!r}; expected low|medium|high|off")
     if s.menu_actions and s.exec_mode != "ax":

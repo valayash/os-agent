@@ -4,7 +4,7 @@ without a Mac.
 What a fake adapter CAN prove: the guard refuses a node that changed, a timeout
 ends the run instead of retrying, a write that did not stick is an error, the
 synthetic path refuses AX actions, capabilities become ops, menu filtering
-drops the dangerous and the unstable, and fan-out collapses to one action.
+and drops the dangerous and the unstable.
 
 What it CANNOT prove: that AXPress needs no focus on this machine. That is
 scripts/ax_background.py, and until it has run, §5.3 stands.
@@ -27,8 +27,6 @@ from os_agent.perception.elements import MENU_CAP, ops_of, to_elements, to_menu
 from os_agent.types import (
     Action,
     Element,
-    Expectation,
-    FanOutPlan,
     MenuCommand,
     RawNode,
     Receipt,
@@ -271,7 +269,7 @@ def test_menu_enters_the_prompt_as_mN():
     assert "[m7] Format > Make Rich Text" in build_user(st)
 
 
-# -- step 6: risk + fan-out --------------------------------------------------------
+# -- step 6: risk --------------------------------------------------------
 def test_high_risk_needs_a_human_even_with_yolo():
     r = policy.requires_approval(Action(kind="click", element_id=0, risk="high"),
                                  [Element(0, "button", "OK", (0, 0, 9, 9))],
@@ -298,27 +296,7 @@ def test_set_value_in_a_filename_field_is_a_rename():
     assert r and "FILENAME" in r
 
 
-def test_fanout_collapses_to_the_chosen_head():
-    plan = FanOutPlan(
-        reasoning="r", subgoal="s", operation="set_value",
-        click_target=4, set_target=2, type_value="Q3", menu_target=1,
-        risk="medium", expect=Expectation(kind="text_in_element", element_id=2, value="Q3"),
-        confidence=0.8,
-    ).to_planned()
-    a = plan.action
-    assert (a.kind, a.element_id, a.text, a.risk) == ("set_value", 2, "Q3", "medium")
-
-
-def test_fanout_missing_head_stays_none_and_is_refused():
-    a = FanOutPlan(reasoning="r", subgoal="s", operation="click",
-                   expect=Expectation(kind="none"), confidence=0.5).to_planned().action
-    assert a.element_id is None
-    v = policy.check(a, [], mode="freeform", frontmost_bundle=APP, allowed_bundles=None,
-                     approval_on=False)
-    assert not v.allowed and v.recoverable
-
-
 def test_default_config_leaves_the_system_prompt_untouched():
     assert system_prompt() == SYSTEM
-    full = system_prompt(exec_mode="ax", menu_actions=True, plan_schema="fanout")
-    assert "set_value" in full and "[mN]" in full and "operation" in full
+    full = system_prompt(exec_mode="ax", menu_actions=True)
+    assert "set_value" in full and "[mN]" in full

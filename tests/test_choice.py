@@ -15,10 +15,10 @@ import json
 import httpx
 import pytest
 
-from os_agent import run
 from os_agent.actions import policy
 from os_agent.actions.executor import Executor
 from os_agent.agent import choice
+from os_agent.agent.planners import make_choice_planner
 from os_agent.agent.state import initial_state
 from os_agent.env.base import ActionError
 from os_agent.llm import jev_client
@@ -247,14 +247,14 @@ async def _fallback(st):
 
 def test_a_click_step_is_one_call():
     jev, text, tr = FakeJev(ans("click", click="0")), FakeText(), Tracer()
-    r = asyncio.run(run.make_choice_planner(jev, text, _fallback, tr)(state()))
+    r = asyncio.run(make_choice_planner(jev, text, _fallback, tr)(state()))
     assert r.raw["calls"] == 1 and text.calls == 0 and tr.calls == 1
     assert isinstance(r.parsed, PlannedAction) and r.parsed.action.element_id == 0
 
 
 def test_a_typing_step_is_two_calls_and_says_so():
     jev, text, tr = FakeJev(ans("type")), FakeText(), Tracer()
-    r = asyncio.run(run.make_choice_planner(jev, text, _fallback, tr)(state()))
+    r = asyncio.run(make_choice_planner(jev, text, _fallback, tr)(state()))
     assert r.raw["calls"] == 2 and tr.calls == 2
     assert r.parsed.action.text == "Q3"
     assert r.cost_usd == pytest.approx(0.002)
@@ -268,6 +268,6 @@ def test_a_sparse_screen_goes_to_the_vision_planner():
         return "vision"
 
     jev = FakeJev(ans("done"))
-    out = asyncio.run(run.make_choice_planner(jev, FakeText(), fallback, Tracer())(
+    out = asyncio.run(make_choice_planner(jev, FakeText(), fallback, Tracer())(
         state(elements=els()[:1])))
     assert out == "vision" and called and jev.calls == 0

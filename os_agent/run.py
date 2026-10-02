@@ -1,298 +1,40 @@
 """CLI and composition root (CLAUDE.md §8.12).
 
-This is where the real model gets wired into the graph. Everything else in the
-project takes its dependencies as arguments; this file is the one place that
-decides what those dependencies actually are.
-
-That is why A3's gate and A4's gate exercise the SAME graph: only the two
-callables built here differ.
+The one place that decides what the graph's dependencies actually are: which
+model, which planner, which adapter. Everything it wires together lives
+elsewhere — planners in agent/planners.py, the loop in agent/graph.py.
 """
 
 import argparse
 import asyncio
-import base64
-import dataclasses
-import json
 import os
 import sys
 import time
 
 import structlog
 
-from os_agent.agent import choice
-from os_agent.agent.graph import (
-    RecursionLimitReached,
-    build_graph,
-    terminal_reason,
-)
-from os_agent.agent.nodes import Planner, Verifier
-from os_agent.agent.prompts import (
-    REFLECT_SYSTEM,
-    build_reflect_user,
-    build_user,
-    system_prompt,
+from os_agent.agent.graph import build_graph, run_graph, terminal_reason
+from os_agent.agent.planners import (
+    make_choice_planner,
+    make_planner,
+    make_reflector,
+    make_verifier,
 )
 from os_agent.agent.state import AgentState, initial_state
 from os_agent.config import settings
 from os_agent.env.desktop_env import DesktopEnv
-from os_agent.llm.base import LLMResult
-from os_agent.llm.jev_client import JevAnswers, JevClient
+from os_agent.llm.jev_client import JevClient
 from os_agent.llm.litellm_client import LiteLLMClient
-from os_agent.perception.elements import SPARSE_THRESHOLD
 from os_agent.telemetry.log import configure
-from os_agent.telemetry.tracer import CallRecord, Tracer
-from os_agent.telemetry.trajectory import StepRecord, TrajectoryWriter, target_of
-from os_agent.types import (
-    Action,
-    Expectation,
-    FanOutPlan,
-    Observation,
-    PlannedAction,
-    Reflection,
-    TextValue,
-)
-from os_agent.verify.cheap import check
+from os_agent.telemetry.tracer import Tracer
+from os_agent.telemetry.trajectory import TrajectoryWriter
+from os_agent.types import Action
 
 log = structlog.get_logger(__name__)
 
 
-def _record_call(tracer: Tracer, node: str, step: int, result: LLMResult) -> None:
-    tracer.record(CallRecord(
-        node=node, step=step, model=result.model,
-        provider=result.provider, latency_ms=result.latency_ms,
-        provider_wait_ms=result.provider_wait_ms,
-        prompt_tokens=result.prompt_tokens,
-        completion_tokens=result.completion_tokens,
-        cost_usd=result.cost_usd, repairs=result.repairs,
-        attempts=result.raw.get("attempts", 1), ok=True,
-    ))
-
-
-def _record_failure(tracer: Tracer, node: str, step: int, client, t0: float,
-                    exc: Exception) -> None:
-    tracer.record(CallRecord(
-        node=node, step=step, model=client.model, provider=client.provider,
-        latency_ms=(time.perf_counter() - t0) * 1000,
-        provider_wait_ms=0.0, prompt_tokens=0, completion_tokens=0,
-        cost_usd=0.0, repairs=0, attempts=1, ok=False,
-        error=f"{type(exc).__name__}: {exc}"[:200],
-    ))
-
-
-def make_choice_planner(jev: JevClient, text_client: LiteLLMClient, fallback: Planner,
-                        tracer: Tracer, traj=None) -> Planner:
-    """The decision as a CHOICE (§19): Jev answers named questions.
-
-    Three routes, decided per step:
-      sparse screen   -> `fallback`, the vision planner. Jev takes text only,
-                         and a window that cannot be described in text has to
-                         be shown as a picture.
-      typing step     -> Jev, then ONE text-model call for the words. Two calls,
-                         counted as two.
-      everything else -> Jev alone. One call.
-    """
-
-    async def plan(state: AgentState):
-        els = state.get("elements") or []
-        if len(els) < SPARSE_THRESHOLD:
-            log.info("choice.fallback", step=state["step"], elements=len(els),
-                     why="too sparse to describe in text; using the vision planner")
-            return await fallback(state)
-
-        req = choice.build_request(state, exec_mode=settings.exec_mode,
-                                   menu_actions=settings.menu_actions)
-        t0 = time.perf_counter()
-        try:
-            result = await asyncio.to_thread(
-                jev.plan, system="", text=json.dumps(req.state, ensure_ascii=False),
-                image_png=b"", schema=JevAnswers, extra={"questions": req.questions},
-            )
-        except Exception as exc:
-            _record_failure(tracer, "plan", state["step"], jev, t0, exc)
-            raise
-        _record_call(tracer, "plan", state["step"], result)
-        planned, needs_text, trace = choice.decode(result.parsed.answers, req, elements=els)
-
-        parts = [result]
-        if needs_text:
-            ctx = {
-                "goal": state["goal"],
-                "app": state.get("app") or "unknown",
-                "operation": planned.action.kind,
-                "target": next((choice.label(e) for e in els
-                                if e.id == planned.action.element_id), "the focused field"),
-                "elements": [choice.label(e) for e in els[:40]],
-                "facts": list(state.get("facts") or []),
-            }
-            t1 = time.perf_counter()
-            try:
-                text_result = await asyncio.to_thread(
-                    text_client.plan, system=choice.TEXT_VALUE,
-                    text=json.dumps(ctx, ensure_ascii=False), image_png=b"",
-                    schema=TextValue, extra=settings.extra_for(text_client.model),
-                )
-            except Exception as exc:
-                _record_failure(tracer, "text", state["step"], text_client, t1, exc)
-                raise
-            _record_call(tracer, "text", state["step"], text_result)
-            planned = choice.with_text(planned, text_result.parsed.text, els)
-            parts.append(text_result)
-
-        combined = LLMResult(
-            parsed=planned,
-            prompt_tokens=sum(p.prompt_tokens for p in parts),
-            completion_tokens=sum(p.completion_tokens for p in parts),
-            latency_ms=sum(p.latency_ms for p in parts),
-            provider_wait_ms=sum(p.provider_wait_ms for p in parts),
-            cost_usd=sum(p.cost_usd for p in parts),
-            repairs=sum(p.repairs for p in parts),
-            model=result.model, provider=result.provider,
-            raw={"calls": len(parts), "attempts": result.raw.get("attempts", 1)},
-        )
-        log.info("choice", step=state["step"], operation=planned.action.kind,
-                 confidence=round(planned.confidence, 3), risk=planned.action.risk,
-                 calls=len(parts))
-        _record_step(traj, state, combined, choice=trace)
-        return combined
-
-    return plan
-
-
-def _record_step(traj, state: AgentState, result: LLMResult, *, fanout=None,
-                 choice=None) -> None:
-    """One trajectory row, written while the action and its elements are in hand."""
-    if traj is None:
-        return
-    planned = result.parsed
-    els = state.get("elements") or []
-    traj.add(StepRecord(
-        step=state["step"],
-        app=state.get("app", ""), bundle_id=state.get("bundle_id", ""),
-        subgoal=planned.subgoal, reasoning=planned.reasoning,
-        action=planned.action.__dict__.copy(),
-        # §4.7 — the stable key, so this step survives id renumbering
-        action_target=target_of(planned.action, els),
-        expect=planned.expect.model_dump(),
-        # the outcome of the PREVIOUS step; this one has not run yet
-        outcome=state.get("last_outcome", ""),
-        reason=state.get("last_reason", ""),
-        elements=len(els),
-        perception_ms=state.get("perception_ms", 0.0),
-        llm_latency_ms=result.latency_ms,
-        provider_wait_ms=result.provider_wait_ms,
-        prompt_tokens=result.prompt_tokens,
-        completion_tokens=result.completion_tokens,
-        cost_usd=result.cost_usd, repairs=result.repairs,
-        facts=list(state.get("facts") or []),
-        reflection_note=state.get("reflection_note", ""),
-        fanout=fanout, choice=choice,
-    ))
-
-
-def make_planner(client: LiteLLMClient, tracer: Tracer, traj=None, adapter=None) -> Planner:
-    """The ONE model call per step. Rebuilt prompt, never appended (§4.2).
-
-    Also records the step to the trajectory HERE, while the action and the
-    elements it referred to are both in hand. A5 shipped a version that rebuilt
-    the whole trajectory from final state afterwards — every row then carried
-    the same app, outcome and reason, and no action at all, which defeats §4.6
-    and §4.7 entirely. A trajectory has to be written as it happens.
-    """
-
-    # Chosen once per run: the system prompt stays byte-identical across calls.
-    system = system_prompt(exec_mode=settings.exec_mode,
-                           menu_actions=settings.menu_actions,
-                           plan_schema=settings.plan_schema)
-    schema = FanOutPlan if settings.plan_schema == "fanout" else PlannedAction
-
-    async def plan(state: AgentState):
-        user = build_user(state, screen=adapter.screen_size_points())
-        image = base64.b64decode(state.get("screenshot_b64") or "")
-        t0 = time.perf_counter()
-        try:
-            result = await asyncio.to_thread(
-                client.plan,
-                system=system,
-                text=user,
-                image_png=image,
-                schema=schema,
-                extra=settings.planner_extra(),
-            )
-        except Exception as exc:
-            _record_failure(tracer, "plan", state["step"], client, t0, exc)
-            raise
-        _record_call(tracer, "plan", state["step"], result)
-
-        heads = None
-        if isinstance(result.parsed, FanOutPlan):
-            # Only the head matching `operation` executes. The others are kept
-            # in the trajectory: they are what speculation would train on.
-            heads = result.parsed.model_dump(exclude={"reasoning", "subgoal", "expect"})
-            result = dataclasses.replace(result, parsed=result.parsed.to_planned())
-
-        _record_step(traj, state, result, fanout=heads)
-        return result
-
-    return plan
-
-
-def make_reflector(client: LiteLLMClient, tracer: Tracer):
-    """The extra call, made only when stuck. Its RATE is the metric (§8.8).
-
-    It gets a richer prompt than the planner — but still no history. Fuller
-    context means more of the CURRENT situation, never an accumulating log.
-    """
-
-    async def reflect(state: AgentState):
-        t0 = time.perf_counter()
-        result = await asyncio.to_thread(
-            client.plan,
-            system=REFLECT_SYSTEM,
-            text=build_reflect_user(state),
-            image_png=base64.b64decode(state.get("screenshot_b64") or ""),
-            schema=Reflection,
-            extra=settings.extra_for(client.model),
-        )
-        tracer.record(CallRecord(
-            node="reflect", step=state["step"], model=result.model,
-            provider=result.provider, latency_ms=result.latency_ms,
-            provider_wait_ms=result.provider_wait_ms,
-            prompt_tokens=result.prompt_tokens,
-            completion_tokens=result.completion_tokens,
-            cost_usd=result.cost_usd, repairs=result.repairs,
-            attempts=result.raw.get("attempts", 1), ok=True,
-        ))
-        _ = t0
-        return result
-
-    return reflect
-
-
-def make_verifier() -> Verifier:
-    """Zero model calls. This is what holds llm_calls/steps at 1.00 (§8.7)."""
-
-    async def verify(
-        state: AgentState, action: Action, expect: Expectation, after: Observation
-    ) -> tuple[str, str]:
-        before_png = base64.b64decode(state.get("screenshot_plain_b64") or "")
-        return check(
-            expect,
-            before_elements=state.get("elements") or [],
-            after_elements=after.elements,
-            before_png=before_png,
-            after_png=after.screenshot,
-            # check() has had this parameter since A4 and nothing ever passed
-            # it. It short-circuits to ("error", reason), which is exactly
-            # what a failed action needs — the expectation is meaningless when
-            # the action never ran.
-            executor_error=state.get("executor_error") or None,
-        )
-
-    return verify
-
-
 def approve_at_terminal(action: Action, verdict) -> bool:
-    """Approval prompt. On by default (§8.6); --yolo turns it off."""
+    """Approval prompt. On by default (§8.6); --yolo turns routine ones off."""
     print(f"\n  ABOUT TO: {action.kind}"
           f"{f' element {action.element_id}' if action.element_id is not None else ''}"
           f"{f' {action.text!r}' if action.text else ''}"
@@ -304,17 +46,37 @@ def approve_at_terminal(action: Action, verdict) -> bool:
         return False
 
 
+def preflight(adapter, app_name: str) -> None:
+    """Bring `app_name` forward and fit its window, or abort.
+
+    Switching apps is not in the agent's action space and cannot be: macOS
+    suppresses programmatic focus changes for a background process, except
+    shortly after real human input — which is now, because a person just
+    pressed Enter on this command (§5.3). Verified, never assumed: a run aimed
+    at the wrong app produces a plausible trajectory of meaningless steps.
+
+    Fitting the window (maximise, NEVER fullscreen) cut a capture from 2,393 KB
+    to 86 KB at A5 (§13) and makes every run see the same layout.
+    """
+    if not adapter.activate_app(app_name):
+        front, bundle = adapter.frontmost_app()
+        log.error("preflight.focus_failed", want=app_name, got=front, bundle=bundle)
+        print(f"\n  ABORT: could not bring {app_name!r} to the front (frontmost is "
+              f"{front!r}).\n  Click the app once yourself, then re-run. §5.3.\n")
+        raise SystemExit(2)
+    adapter.fit_frontmost_window()
+    time.sleep(0.4)  # let the resize settle before the first capture
+    log.info("preflight.ok", app=adapter.frontmost_app()[0])
+
+
 async def run_task(goal: str, task_id: str, *, yolo: bool, max_steps: int | None = None,
-                   app_name: str | None = None):
+                   app_name: str | None = None) -> tuple[AgentState, float | None, dict]:
     configure(pretty=True)
-    # Imported here, not at module top, so the planners above can be imported
-    # and tested on a machine without pyobjc.
+    # Imported here so the rest of this module imports on a machine without pyobjc.
     from os_agent.desktop.macos import MacOSAdapter
 
-    tracer = Tracer()
-    # A choice backend (Jev) cannot write: the words it types and the
-    # reflection advice come from MODEL_SMALL, and so does the vision fallback
-    # for screens too sparse to describe in text (§19).
+    # A choice backend (Jev) cannot write: typed text, reflection and the
+    # vision fallback for sparse screens go to MODEL_SMALL instead (§19).
     if settings.planner_is_choice:
         if not os.getenv("JEV_API_KEY"):
             raise SystemExit("MODEL_PLANNER is a Jev model but JEV_API_KEY is not set.")
@@ -322,98 +84,51 @@ async def run_task(goal: str, task_id: str, *, yolo: bool, max_steps: int | None
         writer = LiteLLMClient(settings.small)
     else:
         client = writer = LiteLLMClient(settings.planner)
-    # Which ablation row this run belongs to. A run without these is unlabelled
-    # and cannot go in the table (§4.11).
+
+    tracer = Tracer()
+    # Which ablation row this run belongs to; a run without these is unlabelled.
     traj = TrajectoryWriter(task_id, goal, client.model, client.provider, extra={
         "exec_mode": settings.exec_mode, "menu_actions": settings.menu_actions,
-        "plan_schema": settings.plan_schema, "ax_max_depth": settings.ax_max_depth,
-        "risk_approval": settings.risk_approval,
+        "ax_max_depth": settings.ax_max_depth, "risk_approval": settings.risk_approval,
     })
     adapter = MacOSAdapter()
-
-    # -- PREFLIGHT (§5.3, §13) ---------------------------------------------
-    # Switching apps is not in the agent's action space and cannot be: macOS
-    # suppresses programmatic focus changes for a background process. The one
-    # moment it does NOT suppress them is right after real human input — which
-    # is now, because a person just pressed Enter on this command.
-    #
-    # So the run owns app focus, the agent never touches it, and we verify
-    # rather than assume. A run that starts pointed at the wrong app produces
-    # a plausible-looking trajectory of entirely meaningless steps; that is
-    # strictly worse than not starting.
     if app_name:
-        if not adapter.activate_app(app_name):
-            front, bundle = adapter.frontmost_app()
-            log.error("preflight.focus_failed", want=app_name, got=front, bundle=bundle)
-            print(f"\n  ABORT: could not bring {app_name!r} to the front "
-                  f"(frontmost is {front!r}).\n"
-                  f"  Click the app once yourself, then re-run. §5.3.\n")
-            raise SystemExit(2)
-        adapter.fit_frontmost_window()
-        time.sleep(0.4)  # let the resize settle before the first capture
-        front, bundle = adapter.frontmost_app()
-        log.info("preflight.ok", app=front, bundle=bundle)
+        preflight(adapter, app_name)
+
     env = DesktopEnv(
         adapter, mode="bench" if task_id != "freeform" else "freeform",
-        # MEASURED A5: a terminal approval prompt BREAKS focus-dependent
-        # automation. Typing "y" makes the terminal frontmost, so the approved
-        # action then fires at the terminal instead of the target app — every
-        # step returns no_change and the agent looks broken when it is not.
-        # §5.3 again, from an angle we did not anticipate.
-        #
-        # The callback is still passed even when approval is off: policy flags
-        # irreversible targets and dangerous chords regardless of the setting
-        # (§8.6), and without a callback those would raise and kill the run.
-        # Routine actions run silently; destructive ones still stop and ask.
+        # MEASURED A5: a terminal prompt makes the TERMINAL frontmost, so the
+        # approved action then fires at it instead of the target app. The
+        # callback is still passed with approval off, because irreversible
+        # targets and dangerous chords ask regardless (§8.6).
         approve=approve_at_terminal,
         approval_on=settings.approval and not yolo,
     )
-    planner = make_planner(writer, tracer, traj, adapter)
+    planner = make_planner(writer, tracer, screen=adapter.screen_size_points(), traj=traj)
     if settings.planner_is_choice:
         planner = make_choice_planner(client, writer, planner, tracer, traj)
-    app = build_graph(
-        env,
-        planner,
-        make_verifier(),
-        make_reflector(writer, tracer),
-        approval=False,
-    )
+    app = build_graph(env, planner, make_verifier(), make_reflector(writer, tracer),
+                      approval=False)
 
     state = initial_state(goal=goal, task_id=task_id, max_steps=max_steps)
     if task_id != "freeform":
         await env.reset(task_id)
-        state["obs_fresh"] = False
 
     cap = max_steps or settings.max_steps
     t0 = time.perf_counter()
-    try:
-        final: AgentState = await app.ainvoke(
-            state, config={"recursion_limit": cap * 6},
-        )
-    except RecursionLimitReached:
-        # The graph should stop itself at `cap` steps; this is the backstop.
-        # Reaching it means a routing bug, so say that rather than dying with
-        # a framework traceback and losing the run's numbers.
-        log.error("graph.recursion_limit", cap=cap,
-                  note="the router should have stopped first — routing bug")
-        final = dict(state, status="failed", terminal_reason="recursion_limit")
-    except KeyboardInterrupt:
-        # Ctrl+C still gets a summary and a closed trajectory. The runs you
-        # most want to read are the ones you had to stop.
-        log.warning("run.interrupted", note="Ctrl+C — writing what we have")
-        final = dict(state, status="failed", terminal_reason="interrupted")
+    final = await run_graph(app, state, recursion_limit=cap * 6)
     wall = time.perf_counter() - t0
 
     score = env.evaluate() if task_id != "freeform" else None
     summary = tracer.summary()
+    reason = terminal_reason(final)
+    detail = f"  ({final.get('last_reason', '')})" if reason == "error" else ""
     steps = final["step"] or 1
 
     print("\n" + "=" * 68)
     print(f"  task            : {task_id}")
-    print(f"  exec mode       : {settings.exec_mode}"
-          f"{'  +menu' if settings.menu_actions else ''}"
-          f"{'  +fanout' if settings.plan_schema == 'fanout' else ''}")
-    print(f"  terminal reason : {terminal_reason(final)}")
+    print(f"  exec mode       : {settings.exec_mode}{'  +menu' if settings.menu_actions else ''}")
+    print(f"  terminal reason : {reason}{detail}")
     if score is not None:
         print(f"  checker         : {score}")
     print(f"  steps           : {final['step']}")
@@ -427,10 +142,9 @@ async def run_task(goal: str, task_id: str, *, yolo: bool, max_steps: int | None
     print(f"  schema repairs  : {summary['schema_repair_rate']:.2f}/call")
     print(f"  reflections     : {final['reflections']}")
 
-    # Steps were recorded as they happened (see make_planner). Just close it.
     path = traj.close({
         "success": score == 1.0 if score is not None else None,
-        "terminal_reason": terminal_reason(final),
+        "terminal_reason": reason,
         "steps": final["step"], "wall_clock_s": round(wall, 2), **summary,
     })
     print(f"  trajectory      : {path}")
@@ -445,18 +159,18 @@ def main() -> int:
     g.add_argument("--task", help="a task id from bench/tasks.py")
     g.add_argument("--freeform", help="an arbitrary instruction, no scoring")
     ap.add_argument("--yolo", action="store_true",
-                    help="skip approval prompts. NEVER unattended (§11).")
+                    help="skip routine approval prompts. NEVER unattended (§11).")
     ap.add_argument("--max-steps", type=int, default=None)
     ap.add_argument("--app", default=None,
-                    help="app to focus and fit to screen BEFORE the run (§5.3). "
-                         "The agent cannot switch apps; this is how it gets pointed.")
+                    help="app to focus and fit to screen BEFORE the run (§5.3)")
     a = ap.parse_args()
 
     if a.task:
         from os_agent.bench import tasks
         goal = tasks.get(a.task).goal
-        return asyncio.run(run_task(goal, a.task, yolo=a.yolo, max_steps=a.max_steps,
-                                    app_name=a.app))[1] != 1.0
+        _, score, _ = asyncio.run(run_task(goal, a.task, yolo=a.yolo,
+                                           max_steps=a.max_steps, app_name=a.app))
+        return 0 if score == 1.0 else 1
     asyncio.run(run_task(a.freeform, "freeform", yolo=a.yolo, max_steps=a.max_steps,
                          app_name=a.app))
     return 0

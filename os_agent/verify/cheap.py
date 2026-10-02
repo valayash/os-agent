@@ -32,6 +32,11 @@ GREY_TOLERANCE = 12  # per-pixel difference below this is noise, not change
 ERROR_WORDS = ("error", "failed", "cannot", "can't", "unable", "denied",
                "not permitted", "invalid", "warning")
 
+# A text field's accessible name IS its content. Typing "the error handler"
+# into a document is not an error dialog appearing, and neither is a document
+# that already contains the word "failed".
+TEXT_ENTRY_ROLES = {"textfield", "textarea", "searchfield", "combobox"}
+
 
 def pixel_change_ratio(before_png: bytes, after_png: bytes) -> float:
     """Fraction of pixels that meaningfully changed. ~5 ms.
@@ -63,10 +68,39 @@ def _has(elements: list[Element], needle: str) -> bool:
 def error_dialog(elements: list[Element]) -> str | None:
     """An error visible on screen means the action failed, whatever it changed."""
     for e in elements:
+        if e.role in TEXT_ENTRY_ROLES:
+            continue
         low = e.name.lower()
         if any(w in low for w in ERROR_WORDS):
             return e.name[:80]
     return None
+
+
+def _same_element(before: list[Element], after: list[Element],
+                  element_id: int) -> Element | None:
+    """The AFTER-screen element that is the one the planner meant.
+
+    expect.element_id is an id from the BEFORE observation, and ids are
+    positional — they renumber on every capture (§4.7). Looking the id up in
+    the after list reads whatever element happens to hold that number now:
+    one new element above the target and the check inspects its neighbour.
+
+    So: find the before element, then its match after by role and position.
+    The name is NOT part of the match — for a text field the name is the
+    content, which is exactly what the action changed.
+    """
+    target = next((e for e in before if e.id == element_id), None)
+    if target is None:
+        return None
+    same_place = [e for e in after if e.role == target.role and e.bbox == target.bbox]
+    if len(same_place) == 1:
+        return same_place[0]
+    # It moved or resized (a text area growing as it fills). Fall back to the
+    # nearest element of the same role, if exactly one is close.
+    cx, cy = target.center
+    near = [e for e in after if e.role == target.role
+            and abs(e.center[0] - cx) + abs(e.center[1] - cy) < 60]
+    return near[0] if len(near) == 1 else None
 
 
 def check(
@@ -127,9 +161,9 @@ def check(
     if kind == "text_in_element":
         if expect.element_id is None or not value:
             return "ambiguous", "text_in_element needs both element_id and value"
-        target = next((e for e in after_elements if e.id == expect.element_id), None)
+        target = _same_element(before_elements, after_elements, expect.element_id)
         if target is None:
-            return "ambiguous", f"element {expect.element_id} is gone; cannot read it"
+            return "ambiguous", f"element {expect.element_id} cannot be found again; cannot read it"
         if value.lower() in target.name.lower():
             return "success", f"element {expect.element_id} contains {value!r}"
         return "no_change", f"element {expect.element_id} does not contain {value!r}"

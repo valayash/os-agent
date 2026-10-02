@@ -55,7 +55,7 @@ os_agent/
   perception/       raw nodes → numbered elements; screenshot annotation
   actions/          executor and guardrails
   verify/cheap.py   verification without a model call
-  agent/            graph, nodes, state, prompts, Jev choice questions
+  agent/            graph, nodes, state, prompts, planners, Jev choice questions
   telemetry/        per-call latency/token/cost tracing; trajectory files
   bench/tasks.py    task definitions (currently: textedit_append)
   run.py            command line
@@ -112,11 +112,10 @@ All switches live in `.env` (see `.env.example`). The ones that change behaviour
 | `APPROVAL` | `on` | `off` is the same as `--yolo` |
 | `EXEC_MODE` | `synthetic` | `ax` presses and writes through the accessibility API instead of mouse/keyboard |
 | `MENU_ACTIONS` | `off` | `on` offers menu-bar commands as `[mN]` items (needs `EXEC_MODE=ax`) |
-| `PLAN_SCHEMA` | `single` | `fanout` asks for a target for every operation in one call |
 | `RISK_APPROVAL` | `high` | the model's risk rating at or above this needs approval; `off` disables |
 | `AX_MAX_DEPTH` | `60` | accessibility tree depth limit |
 
-`EXEC_MODE=ax`, `MENU_ACTIONS`, `PLAN_SCHEMA=fanout` and the Jev backend are
+`EXEC_MODE=ax`, `MENU_ACTIONS` and the Jev backend are
 implemented and unit-tested, but **have not yet been run on a Mac or against the live
 Jev API**. The synthetic path is the one the passed phases above were run on.
 

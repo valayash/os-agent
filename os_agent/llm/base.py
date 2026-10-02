@@ -4,7 +4,7 @@ Every model call in the project goes through this protocol (CLAUDE.md §4.9,
 §11). Swapping Gemini for Anthropic for a local model is an env var, and the
 cost/latency instrumentation lives in exactly one place.
 
-No implementation here — litellm_client.py arrives at A4.
+Implementations: litellm_client.py (any chat provider), jev_client.py (Jev).
 """
 
 from dataclasses import dataclass, field

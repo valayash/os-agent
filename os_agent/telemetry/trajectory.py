@@ -21,7 +21,7 @@ from pathlib import Path
 
 import structlog
 
-from os_agent.types import Action, Element, Expectation
+from os_agent.types import Action, Element
 
 log = structlog.get_logger(__name__)
 RUNS = Path("runs")
@@ -51,9 +51,6 @@ class StepRecord:
     facts: list[str] = field(default_factory=list)
     reflection_note: str = ""
     screenshot: str = ""  # a path, never the bytes
-    # PLAN_SCHEMA=fanout: every head the model filled, including the ones that
-    # did not execute — what it would have done otherwise.
-    fanout: dict | None = None
     # Choice backend (Jev): the operation's probability distribution, the risk
     # score and every target head — measured, not self-reported.
     choice: dict | None = None
@@ -67,14 +64,6 @@ def target_of(action: Action | None, elements: list[Element]) -> dict | None:
         if e.id == action.element_id:
             return {"id": e.id, "role": e.role, "name": e.name, "bbox": list(e.bbox)}
     return {"id": action.element_id, "role": "?", "name": "?", "bbox": None}
-
-
-def _plain(obj) -> dict | None:
-    if obj is None:
-        return None
-    if isinstance(obj, Action | Expectation):
-        return obj.model_dump() if hasattr(obj, "model_dump") else asdict(obj)
-    return asdict(obj)
 
 
 class TrajectoryWriter:

@@ -29,6 +29,10 @@ log = structlog.get_logger(__name__)
 # one of the larger free wins in §13. Do not tune it before the baseline.
 SETTLE_S = 0.5
 
+# A `wait` is the model asking for time. It is not allowed to ask for ten
+# minutes: the run would sit idle with a human at the keyboard (§5.3).
+MAX_WAIT_MS = 5000
+
 ApproveFn = Callable[[Action, Verdict], bool]
 
 
@@ -303,6 +307,6 @@ class Executor:
             x, y = self._point(action, elements)
             self.adapter.scroll(x, y, action.amount or 3)
         elif k == "wait":
-            time.sleep((action.amount or 1000) / 1000)
+            time.sleep(min(max(action.amount or 1000, 0), MAX_WAIT_MS) / 1000)
         else:
             raise ActionError(f"executor has no handler for action kind {k!r}")

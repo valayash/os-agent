@@ -1,10 +1,12 @@
 """macOS adapter — the only implemented platform in Phase A (CLAUDE.md §8.2).
 
-    frontmost:  NSWorkspace.frontmostApplication()
-    capture:    CGDisplayCreateImage (in-process; no subprocess, no disk)
+    frontmost:  the window server's front-to-back order (NOT NSWorkspace, see
+                frontmost_app)
+    capture:    CGDisplayCreateImage, falling back to the screencapture CLI
+    tree:       AX walk of the frontmost app's focused window + top-level menu bar
     keyboard:   CGEvent with explicit flags  — NOT pyautogui, see below
     mouse:      pyautogui (this half is fine)
-    tree / ocr: A2
+    ocr:        deferred — raises (CLAUDE.md §8.2)
     AX exec:    AXUIElementPerformAction / AXUIElementSetAttributeValue — the
                 EXEC_MODE=ax path (CLAUDE.md §4.11). Straight into the target
                 process; no window server, no cursor, no focus change.
@@ -114,7 +116,6 @@ _CONTAINER_ROLES = {
 
 # AX error codes worth naming (AXError.h).
 _AX_ERR_CANNOT_COMPLETE = -25204  # the app never replied: it MAY have acted
-_AX_ERR_INVALID_ELEMENT = -25202
 
 # Menu walk caps. Menus are walked eagerly only on the AX path, cached per pid.
 _MENU_MAX_DEPTH = 3  # bar item > menu item > submenu item
@@ -146,6 +147,22 @@ def _bbox(node) -> tuple[int, int, int, int] | None:
         return None
     x, y = int(pos.x), int(pos.y)
     return x, y, x + int(size.width), y + int(size.height)
+
+
+def _main_window(app_ref):
+    """The window the walk, the fit and the AX handles all agree on.
+
+    The focused window first, as §8.2 specifies — AXWindows[0] is only usually
+    the front one, and with two Finder windows open "usually" is the bug. Then
+    the main window, then the first listed, for apps that report neither.
+    ONE function so a handle recorded by the walk resolves against the same
+    window it was read from.
+    """
+    for attr in ("AXFocusedWindow", "AXMainWindow"):
+        if (w := _attr(app_ref, attr)) is not None:
+            return w
+    windows = _attr(app_ref, "AXWindows")
+    return windows[0] if windows else None
 
 
 def _capabilities(node, role: str) -> tuple[tuple[str, ...], bool]:
@@ -314,22 +331,6 @@ class MacOSAdapter:
             return int(w.get("kCGWindowOwnerPID", 0)) or None
         return None
 
-    def _frontmost_window_owner(self) -> str:
-        """Owner of the front-most normal window, per the window server."""
-        info = Quartz.CGWindowListCopyWindowInfo(
-            Quartz.kCGWindowListOptionOnScreenOnly
-            | Quartz.kCGWindowListExcludeDesktopElements,
-            Quartz.kCGNullWindowID,
-        ) or []
-        for w in info:
-            if w.get("kCGWindowLayer", 1) != 0:
-                continue
-            b = w.get("kCGWindowBounds", {})
-            if b.get("Width", 0) < 200 or b.get("Height", 0) < 120:
-                continue
-            return str(w.get("kCGWindowOwnerName", "")).replace(_LTR_MARK, "").strip()
-        return ""
-
     # -- input -------------------------------------------------------------
     def click(self, x: int, y: int, kind: str = "click") -> None:
         if kind == "double_click":
@@ -377,9 +378,6 @@ class MacOSAdapter:
 
     def scroll(self, x: int, y: int, amount: int) -> None:
         pyautogui.scroll(amount, x=x, y=y)
-
-    def wait(self, seconds: float) -> None:
-        time.sleep(seconds)
 
     # -- window management (PREFLIGHT ONLY, never in the action space) ------
     #
@@ -432,10 +430,9 @@ class MacOSAdapter:
             return False
         ref = AXUIElementCreateApplication(pid)
         AXUIElementSetMessagingTimeout(ref, _AX_TIMEOUT_S)
-        err, windows = AXUIElementCopyAttributeValue(ref, "AXWindows", None)
-        if err != 0 or not windows:
+        window = _main_window(ref)
+        if window is None:
             return False
-        window = windows[0]
 
         # visibleFrame excludes the menu bar and the Dock, wherever the Dock
         # is. AppKit's origin is BOTTOM-left; AX wants TOP-left, so the y flip
@@ -530,9 +527,8 @@ class MacOSAdapter:
                         )
                     )
 
-        err, windows = AXUIElementCopyAttributeValue(ref, "AXWindows", None)
-        if err == 0 and windows:
-            self._walk(windows[0], 0, out, sw, sh, pid=pid, idx=(), depth_cap=depth_cap)
+        if (window := _main_window(ref)) is not None:
+            self._walk(window, 0, out, sw, sh, pid=pid, idx=(), depth_cap=depth_cap)
         return out
 
     def _walk(self, node, depth: int, out: list[RawNode], sw: int, sh: int, *,
@@ -602,10 +598,9 @@ class MacOSAdapter:
         ref = AXUIElementCreateApplication(pid)
         AXUIElementSetMessagingTimeout(ref, _AX_TIMEOUT_S)
         if kind == "w":
-            windows = _attr(ref, "AXWindows")
-            if not windows:
+            node = _main_window(ref)
+            if node is None:
                 return None
-            node = windows[0]
             for i in (int(x) for x in rest.split("/") if x != ""):
                 kids = _attr(node, "AXChildren")
                 if not kids or i >= len(kids):
@@ -666,10 +661,11 @@ class MacOSAdapter:
         ref = AXUIElementCreateApplication(pid)
         AXUIElementSetMessagingTimeout(ref, _AX_TIMEOUT_S)
         wins = _attr(ref, "AXWindows") or []
-        if not wins:
+        main = _main_window(ref)
+        if main is None:
             return (0,)
-        return (len(wins), _clean(_attr(wins[0], "AXTitle")),
-                len(_attr(wins[0], "AXChildren") or []))
+        return (len(wins), _clean(_attr(main, "AXTitle")),
+                len(_attr(main, "AXChildren") or []))
 
     def _perform(self, path: str, action: str, mechanism: str) -> Receipt:
         node = self._resolve(path)
@@ -782,4 +778,4 @@ class MacOSAdapter:
     def ocr(self, image_png: bytes, bbox: tuple[int, int, int, int]) -> str:
         # A2: VNRecognizeTextRequest (Apple Vision) — on-device, Neural Engine,
         # far better on UI text than Tesseract and no extra binary.
-        raise NotOnThisPlatform("ocr is A2 (CLAUDE.md §9).")
+        raise NotOnThisPlatform("ocr is deferred (CLAUDE.md §8.2).")

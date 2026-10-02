@@ -153,7 +153,10 @@ class LiteLLMClient:
                 )
                 ms = (time.perf_counter() - t0) * 1000
                 u = resp.usage
-                return (resp.choices[0].message.content,
+                # content is None when a provider returns only a refusal or a
+                # tool call; "" then fails parsing and takes the repair path
+                # instead of crashing inside strip_fences.
+                return (resp.choices[0].message.content or "",
                         (u.prompt_tokens, u.completion_tokens), ms, wait_ms, attempt)
             except Exception as exc:  # noqa: BLE001
                 failed_ms = (time.perf_counter() - t0) * 1000

@@ -15,8 +15,6 @@ latency by 6x while telling you nothing about the agent. So:
     agent_latency = wall_clock - provider_wait     <- OURS, the reported number
 """
 
-import time
-from contextlib import contextmanager
 from dataclasses import dataclass, field
 
 import structlog
@@ -110,17 +108,6 @@ class Tracer:
             "cost_usd": round(self.cost, 5),
             "schema_repair_rate": round(self.repair_rate, 3),
         }
-
-
-@contextmanager
-def timed():
-    """Wall-clock for a block, in ms."""
-    t0 = time.perf_counter()
-    box = {}
-    try:
-        yield box
-    finally:
-        box["ms"] = (time.perf_counter() - t0) * 1000
 
 
 def price(model: str, prompt: int, completion: int) -> float:

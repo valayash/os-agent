@@ -358,6 +358,7 @@ os-agent/
 │   │   ├── nodes.py            # observe / plan / execute / verify / reflect
 │   │   ├── state.py            # AgentState TypedDict
 │   │   ├── prompts.py          # prompt builders (rebuilt, never appended)
+│   │   ├── planners.py         # planner / reflector / verifier the graph is built from
 │   │   └── choice.py           # Jev questions out, PlannedAction back (§19)
 │   │
 │   ├── memory/                 # Phase B — stubs only in Phase A
@@ -409,7 +410,7 @@ from typing import Literal
 
 ActionKind = Literal[
     "click", "double_click", "right_click",
-    "type", "key", "scroll", "drag",
+    "type", "key", "scroll",
     "set_value", "menu",                      # EXEC_MODE=ax only (§4.11, §19)
     "wait", "done", "fail",
 ]
@@ -481,14 +482,6 @@ class PlannedAction(BaseModel):
     expect: Expectation                       # verification without an LLM
     confidence: float                         # Phase B
     new_fact: str | None = None               # at most ONE per step
-
-class FanOutPlan(BaseModel):                  # PLAN_SCHEMA=fanout — §19 step 6
-    operation: Literal["click", "type", "set_value", "menu",
-                       "key", "scroll", "wait", "done", "fail"]
-    click_target / type_value / set_target / menu_target / keys / scroll_target / amount
-    risk: Risk = "low"                        # no extra round trip for a safety rating
-    reasoning, subgoal, expect, confidence, new_fact     # as PlannedAction
-    def to_planned(self) -> PlannedAction     # only the matching head executes
 ```
 
 ```python
@@ -1189,7 +1182,6 @@ APPROVAL=on                 # on | off  (off == --yolo)
 # ---- execution path (§4.11, §19) ----
 EXEC_MODE=synthetic         # synthetic (THE benchmark) | ax (labelled ablation row)
 MENU_ACTIONS=off            # on: menu commands as [mN]; needs EXEC_MODE=ax
-PLAN_SCHEMA=single          # single | fanout
 RISK_APPROVAL=high          # planner risk >= this needs a human, even with --yolo
 AX_MAX_DEPTH=60             # was 20 at A2
 
@@ -1842,7 +1834,7 @@ long-lived bridge (one traversal per step, no process launch) — step 7 below, 
 | 3 | `press` / `set_value` / `invoke_menu` on the adapter, guarded, returning `Receipt` | **built**, `EXEC_MODE=ax` |
 | 4 | menu action space, `[mN]` | **built**, `MENU_ACTIONS=on` |
 | 5 | background test — does AX action take focus? | **script written**, `scripts/ax_background.py`. NOT RUN |
-| 6 | fan-out schema + `risk` into approval | **built**, `PLAN_SCHEMA=fanout`; `risk` gate always on |
+| 6 | `risk` into approval | **built**, always on. The fan-out schema was built and then REMOVED in the 2026-10-02 cleanup: its only addition was the risk rating, which `Action.risk` already carries, and Jev answers in fan-out form natively |
 | — | Jev choice backend: decision as named questions with distributions | **built**, `MODEL_PLANNER=jev/…`. NOT CALLED LIVE |
 | 7 | persistent bridge | **deferred**: 77 ms against a ~900–4,000 ms decision is not the bottleneck |
 
@@ -1927,7 +1919,7 @@ made to the live API from this repo** — the request shape is the reference rep
 
 ### Ablation rows this produces
 
-`baseline` · `+ AX execution` · `+ menu action space` · `+ fan-out` · **`choice backend
+`baseline` · `+ AX execution` · `+ menu action space` · **`choice backend
 (Jev) vs generative planner`** — each a separate `.env` change, each labelled in
 `meta.json`. Capability filtering and the depth cap are in
 the baseline itself.

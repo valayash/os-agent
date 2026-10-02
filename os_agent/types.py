@@ -24,7 +24,7 @@ from pydantic import BaseModel, Field
 # executor refuses them as a recoverable error and the prompt never offers them.
 ActionKind = Literal[
     "click", "double_click", "right_click",
-    "type", "key", "scroll", "drag",
+    "type", "key", "scroll",
     "set_value", "menu",
     "wait", "done", "fail",
 ]
@@ -163,9 +163,7 @@ class Action:
     keys: list[str] | None = None
     amount: int | None = None  # scroll ticks
     # Escape hatch for when perception misses a target. POINTS.
-    # NOTE: this serializes as a JSON array-of-2 in the planner's schema.
-    # Verify at A4 that the provider's structured output handles fixed-length
-    # tuples; if not, this becomes two fields rather than a silent coercion.
+    # Serializes as a JSON array-of-2 (`prefixItems`); Gemini 3 accepts it (A4).
     coords: tuple[int, int] | None = None
     risk: Risk | None = None  # the planner's rating; see Risk above
 
@@ -246,67 +244,3 @@ class PlannedAction(BaseModel):
         ),
     )
 
-
-# --------------------------------------------------------------------------
-# Fan-out schema — PLAN_SCHEMA=fanout (CLAUDE.md §4.11, ablation row)
-# --------------------------------------------------------------------------
-FanOutOp = Literal[
-    "click", "type", "set_value", "menu", "key", "scroll", "wait", "done", "fail",
-]
-
-
-class FanOutPlan(BaseModel):
-    """One request, several heads. Only the head matching `operation` runs.
-
-    The model commits to a target for EVERY operation it might take, in the
-    same call. Phase B's speculation reads the unused heads (what would it have
-    done otherwise?), and `risk` comes back with no extra round trip where a
-    separate safety reviewer would be a second call on the critical path.
-    llm_calls_per_step stays 1.00 while each call does more.
-    """
-
-    reasoning: str = Field(description="At most two sentences. Why this action, now.")
-    subgoal: str = Field(description="The immediate objective, a few words.")
-    operation: FanOutOp
-    click_target: int | None = Field(default=None, description="Element to click/press.")
-    type_value: str | None = Field(
-        default=None, description="Text for `type` (at the focus) or `set_value`."
-    )
-    set_target: int | None = Field(
-        default=None, description="Element whose value `set_value` REPLACES."
-    )
-    menu_target: int | None = Field(default=None, description="Menu command number, [mN].")
-    keys: list[str] | None = Field(default=None, description='e.g. ["cmd","s"].')
-    scroll_target: int | None = None
-    amount: int | None = Field(default=None, description="scroll ticks or wait ms.")
-    risk: Risk = Field(
-        default="low",
-        description="high = deletes, sends, overwrites or cannot be undone.",
-    )
-    expect: Expectation
-    confidence: float = Field(ge=0.0, le=1.0)
-    new_fact: str | None = None
-
-    def to_planned(self) -> PlannedAction:
-        """Collapse to the one action that executes. Missing heads stay None,
-        and the executor refuses them as a recoverable error — never guessed."""
-        op = self.operation
-        a = Action(kind=op, risk=self.risk)
-        if op == "click":
-            a.element_id = self.click_target
-        elif op == "type":
-            a.text = self.type_value
-        elif op == "set_value":
-            a.element_id, a.text = self.set_target, self.type_value
-        elif op == "menu":
-            a.element_id = self.menu_target
-        elif op == "key":
-            a.keys = self.keys
-        elif op == "scroll":
-            a.element_id, a.amount = self.scroll_target, self.amount
-        elif op == "wait":
-            a.amount = self.amount
-        return PlannedAction(
-            reasoning=self.reasoning, subgoal=self.subgoal, action=a,
-            expect=self.expect, confidence=self.confidence, new_fact=self.new_fact,
-        )

@@ -13,6 +13,9 @@ unrunnable. Containing it here is what keeps that experiment possible.
                                        └─ other ────→ reflect ─┴→ END(fail)
 """
 
+import asyncio
+
+import structlog
 from langgraph.errors import GraphRecursionError
 from langgraph.graph import END, StateGraph
 
@@ -25,11 +28,7 @@ from os_agent.agent.state import (
 from os_agent.config import settings
 from os_agent.env.base import Environment
 
-# Re-exported so run.py can catch it WITHOUT importing langgraph itself.
-# §13's "LangGraph vs custom runtime" ablation is only runnable while the
-# framework stays contained in this file; a custom runtime would raise its own
-# error and re-alias it here, and nothing else would change.
-RecursionLimitReached = GraphRecursionError
+log = structlog.get_logger(__name__)
 
 
 def route_after_verify(state: AgentState) -> str:
@@ -146,3 +145,39 @@ def terminal_reason(state: AgentState) -> str:
     if state["reflections"] > MAX_REFLECTIONS:
         return "stuck"
     return "error"
+
+
+async def run_graph(app, state: AgentState, *, recursion_limit: int) -> AgentState:
+    """Run to the end and return the LAST state reached — whatever ends it.
+
+    Streaming rather than ainvoke() is the point. ainvoke() returns nothing
+    when it raises, so every abnormal end used to report the INITIAL state:
+    0 steps, 0 reflections, no outcome. And three ways to end were never
+    handled at all:
+
+      Ctrl+C       asyncio.run() delivers it as CancelledError inside the
+                   coroutine, never KeyboardInterrupt — so the "interrupted"
+                   handler in run.py could not fire, and Ctrl+C lost the
+                   summary and the trajectory close.
+      any error    a provider outage, a schema failure, an adapter crash: a
+                   traceback, no checker, no summary.
+      step loop    the recursion backstop — a routing bug if it ever fires.
+
+    Each now ends the run with a terminal_reason and the real state.
+    """
+    last = state
+    try:
+        async for snapshot in app.astream(state, config={"recursion_limit": recursion_limit},
+                                          stream_mode="values"):
+            last = snapshot
+    except GraphRecursionError:
+        log.error("graph.recursion_limit", note="the router should have stopped first")
+        return dict(last, status="failed", terminal_reason="recursion_limit")
+    except asyncio.CancelledError:
+        log.warning("run.interrupted", note="Ctrl+C — keeping what we have")
+        return dict(last, status="failed", terminal_reason="interrupted")
+    except Exception as exc:  # noqa: BLE001 — the run ends; the record must not
+        log.error("run.error", error=f"{type(exc).__name__}: {exc}"[:300])
+        return dict(last, status="failed", terminal_reason="error",
+                    last_reason=f"{type(exc).__name__}: {exc}"[:200])
+    return last
